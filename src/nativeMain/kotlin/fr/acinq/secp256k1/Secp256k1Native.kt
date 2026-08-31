@@ -519,6 +519,52 @@ public object Secp256k1Native : Secp256k1 {
             return sig64
         }
     }
+
+    override fun musigPubkeyGet(keyaggCache: ByteArray): ByteArray {
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        keyaggCache.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        memScoped {
+            val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
+            memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
+            val nPubkey = alloc<secp256k1_pubkey>()
+            secp256k1_musig_pubkey_get(ctx, nPubkey.ptr, nKeyAggCache.ptr).requireSuccess("secp256k1_musig_pubkey_get() failed")
+            return serializePubkey(nPubkey)
+        }
+    }
+
+    override fun musigNonceParity(session: ByteArray): Int {
+        require(session.size == Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE)
+        session.checkMusigMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
+        memScoped {
+            val nSession = alloc<secp256k1_musig_session>()
+            memcpy(nSession.ptr, toNat(session), Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE.toULong())
+            val nParity = alloc<IntVar>()
+            secp256k1_musig_nonce_parity(ctx, nParity.ptr, nSession.ptr).requireSuccess("secp256k1_musig_nonce_parity() failed")
+            return nParity.value
+        }
+    }
+
+    override fun musigAdapt(preSig64: ByteArray, secAdaptor32: ByteArray, nonceParity: Int): ByteArray {
+        require(preSig64.size == 64)
+        require(secAdaptor32.size == 32)
+        require(nonceParity in 0..1)
+        memScoped {
+            val nSig64 = allocArray<UByteVar>(64)
+            secp256k1_musig_adapt(ctx, nSig64, toNat(preSig64), toNat(secAdaptor32), nonceParity).requireSuccess("secp256k1_musig_adapt() failed")
+            return nSig64.readBytes(64)
+        }
+    }
+
+    override fun musigExtractAdaptor(sig64: ByteArray, preSig64: ByteArray, nonceParity: Int): ByteArray {
+        require(sig64.size == 64)
+        require(preSig64.size == 64)
+        require(nonceParity in 0..1)
+        memScoped {
+            val nSecAdaptor32 = allocArray<UByteVar>(32)
+            secp256k1_musig_extract_adaptor(ctx, nSecAdaptor32, toNat(sig64), toNat(preSig64), nonceParity).requireSuccess("secp256k1_musig_extract_adaptor() failed")
+            return nSecAdaptor32.readBytes(32)
+        }
+    }
 }
 
 internal actual fun getSecpk256k1(): Secp256k1 = Secp256k1Native

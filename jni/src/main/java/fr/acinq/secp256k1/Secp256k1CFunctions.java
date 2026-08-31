@@ -110,4 +110,12 @@ public class Secp256k1CFunctions {
     public static native int secp256k1_musig_partial_sig_verify(long ctx, byte[] psig, byte[] pubnonce, byte[] pubkey, byte[] keyagg_cache, byte[] session);
 
     public static native byte[] secp256k1_musig_partial_sig_agg(long ctx, byte[] session, byte[][] psigs);
+
+    public static native byte[] secp256k1_musig_pubkey_get(long ctx, byte[] keyagg_cache);
+
+    public static native int secp256k1_musig_nonce_parity(long ctx, byte[] session);
+
+    public static native byte[] secp256k1_musig_adapt(long ctx, byte[] pre_sig64, byte[] sec_adaptor32, int nonce_parity);
+
+    public static native byte[] secp256k1_musig_extract_adaptor(long ctx, byte[] sig64, byte[] pre_sig64, int nonce_parity);
 }

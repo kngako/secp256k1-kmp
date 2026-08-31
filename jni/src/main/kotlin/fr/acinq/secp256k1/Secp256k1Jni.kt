@@ -205,4 +205,28 @@ public object Secp256k1Jni : Secp256k1 {
         psigs.forEach { require(it.size == 32) { "partial signature must be 32 bytes" } }
         return Secp256k1CFunctions.secp256k1_musig_partial_sig_agg(Secp256k1Context.getContext(), session, psigs)
     }
+
+    override fun musigPubkeyGet(keyaggCache: ByteArray): ByteArray {
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) { "invalid keyagg cache size" }
+        return Secp256k1CFunctions.secp256k1_musig_pubkey_get(Secp256k1Context.getContext(), keyaggCache)
+    }
+
+    override fun musigNonceParity(session: ByteArray): Int {
+        require(session.size == Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE) { "invalid session size" }
+        return Secp256k1CFunctions.secp256k1_musig_nonce_parity(Secp256k1Context.getContext(), session)
+    }
+
+    override fun musigAdapt(preSig64: ByteArray, secAdaptor32: ByteArray, nonceParity: Int): ByteArray {
+        require(preSig64.size == 64) { "pre-signature must be 64 bytes" }
+        require(secAdaptor32.size == 32) { "adaptor secret must be 32 bytes" }
+        require(nonceParity in 0..1) { "nonce parity must be 0 or 1" }
+        return Secp256k1CFunctions.secp256k1_musig_adapt(Secp256k1Context.getContext(), preSig64, secAdaptor32, nonceParity)
+    }
+
+    override fun musigExtractAdaptor(sig64: ByteArray, preSig64: ByteArray, nonceParity: Int): ByteArray {
+        require(sig64.size == 64) { "signature must be 64 bytes" }
+        require(preSig64.size == 64) { "pre-signature must be 64 bytes" }
+        require(nonceParity in 0..1) { "nonce parity must be 0 or 1" }
+        return Secp256k1CFunctions.secp256k1_musig_extract_adaptor(Secp256k1Context.getContext(), sig64, preSig64, nonceParity)
+    }
 }

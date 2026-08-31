@@ -292,6 +292,44 @@ public interface Secp256k1 {
      * @return 64-byte aggregated schnorr signature.
      */
     public fun musigPartialSigAgg(session: ByteArray, psigs: Array<ByteArray>): ByteArray
+
+    /**
+     * Get the full aggregated public key from a key aggregation cache.
+     *
+     * @param keyaggCache key aggregation cache filled by [musigPubkeyAgg].
+     * @return the uncompressed aggregated public key (65 bytes).
+     */
+    public fun musigPubkeyGet(keyaggCache: ByteArray): ByteArray
+
+    /**
+     * Get the parity of the aggregate nonce used by a signing session. This is needed when using adaptor
+     * signatures: it must be provided to [musigAdapt] and [musigExtractAdaptor].
+     *
+     * @param session signing session context (see [musigNonceProcess]).
+     * @return 0 if the aggregate nonce has an even y coordinate, 1 otherwise.
+     */
+    public fun musigNonceParity(session: ByteArray): Int
+
+    /**
+     * Create a signature from a musig2 pre-signature and an adaptor secret.
+     *
+     * @param preSig64 64-byte pre-signature (see [musigPartialSigAgg]).
+     * @param secAdaptor32 32-byte adaptor secret.
+     * @param nonceParity parity of the aggregate nonce (see [musigNonceParity]).
+     * @return 64-byte schnorr signature. Note that this function does not verify the signature: if the adaptor
+     * secret is incorrect, the returned signature will be invalid.
+     */
+    public fun musigAdapt(preSig64: ByteArray, secAdaptor32: ByteArray, nonceParity: Int): ByteArray
+
+    /**
+     * Extract an adaptor secret from a musig2 pre-signature and its corresponding adapted signature.
+     *
+     * @param sig64 64-byte adapted schnorr signature (see [musigAdapt]).
+     * @param preSig64 64-byte pre-signature corresponding to [sig64].
+     * @param nonceParity parity of the aggregate nonce (see [musigNonceParity]).
+     * @return 32-byte adaptor secret.
+     */
+    public fun musigExtractAdaptor(sig64: ByteArray, preSig64: ByteArray, nonceParity: Int): ByteArray
     
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic

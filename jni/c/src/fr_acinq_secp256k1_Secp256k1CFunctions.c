@@ -1106,3 +1106,97 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
 
     return copy_bytes_to_java(penv, sig64, 64);
 }
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_musig_pubkey_get
+ * Signature: (J[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1musig_1pubkey_1get(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jkeyaggcache)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_pubkey pubkey;
+    secp256k1_musig_keyagg_cache keyaggcache;
+    unsigned char pub[65];
+    size_t size;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jkeyaggcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_KEYAGG_CACHE_SIZE, keyaggcache.data, "keyagg cache")) return NULL;
+    CHECKMAGIC(keyaggcache.data, MUSIG_KEYAGG_CACHE_MAGIC, "invalid keyagg cache");
+
+    result = secp256k1_musig_pubkey_get(ctx, &pubkey, &keyaggcache);
+    CHECKRESULT(!result, "secp256k1_musig_pubkey_get failed");
+
+    size = 65;
+    result = secp256k1_ec_pubkey_serialize(ctx, pub, &size, &pubkey, SECP256K1_EC_UNCOMPRESSED);
+    CHECKRESULT(!result, "secp256k1_ec_pubkey_serialize failed");
+
+    return copy_bytes_to_java(penv, pub, 65);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_musig_nonce_parity
+ * Signature: (J[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1musig_1nonce_1parity(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_musig_session session;
+    int nonce_parity = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jsession, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_SESSION_SIZE, session.data, "session")) return 0;
+    CHECKMAGIC(session.data, MUSIG_SESSION_MAGIC, "invalid session");
+
+    result = secp256k1_musig_nonce_parity(ctx, &nonce_parity, &session);
+    CHECKRESULT(!result, "secp256k1_musig_nonce_parity failed");
+
+    return nonce_parity;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_musig_adapt
+ * Signature: (J[B[BI)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1musig_1adapt(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jpre_sig64, jbyteArray jsec_adaptor32, jint jnonce_parity)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char pre_sig64[64], sec_adaptor32[32], sig64[64];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jpre_sig64, 64, pre_sig64, "pre-signature")) return NULL;
+    if (!get_bytes32(penv, jsec_adaptor32, sec_adaptor32, "adaptor secret")) return NULL;
+    CHECKRESULT(jnonce_parity < 0 || jnonce_parity > 1, "nonce parity must be 0 or 1");
+
+    result = secp256k1_musig_adapt(ctx, sig64, pre_sig64, sec_adaptor32, jnonce_parity);
+    CHECKRESULT(!result, "secp256k1_musig_adapt failed");
+
+    return copy_bytes_to_java(penv, sig64, 64);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_musig_extract_adaptor
+ * Signature: (J[B[BI)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1musig_1extract_1adaptor(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsig64, jbyteArray jpre_sig64, jint jnonce_parity)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char sig64[64], pre_sig64[64], sec_adaptor32[32];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jsig64, 64, sig64, "signature")) return NULL;
+    if (!get_bytes(penv, jpre_sig64, 64, pre_sig64, "pre-signature")) return NULL;
+    CHECKRESULT(jnonce_parity < 0 || jnonce_parity > 1, "nonce parity must be 0 or 1");
+
+    result = secp256k1_musig_extract_adaptor(ctx, sec_adaptor32, sig64, pre_sig64, jnonce_parity);
+    CHECKRESULT(!result, "secp256k1_musig_extract_adaptor failed");
+
+    return copy_bytes_to_java(penv, sec_adaptor32, 32);
+}

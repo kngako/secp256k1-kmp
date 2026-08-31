@@ -288,6 +288,60 @@ class Musig2Test {
         }
     }
 
+    @Test
+    fun getAggregatePublicKey() {
+        val privkeys = listOf(
+            Hex.decode("EEC1CB7D1B7254C5CAB0D9C61AB02E643D464A59FE6C96A7EFE871F07C5AEF54"),
+            Hex.decode("487356F98AA7A0DC5E0E0F61B4CDA5D1A5B4C59F1B1E5A70E0D55C11FE0A99A1")
+        )
+        val pubkeys = privkeys.map { Secp256k1.pubkeyCreate(it) }.toTypedArray()
+        val keyaggCache = ByteArray(Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        val aggXonly = Secp256k1.musigPubkeyAgg(pubkeys, keyaggCache)
+        // The x coordinate of the full aggregated public key must match the x-only aggregated public key.
+        val aggPubkey = Secp256k1.musigPubkeyGet(keyaggCache)
+        assertEquals(65, aggPubkey.size)
+        assertContentEquals(aggXonly, aggPubkey.copyOfRange(1, 33))
+        assertContentEquals(aggPubkey, Secp256k1.pubkeyParse(aggPubkey))
+    }
+
+    @Test
+    fun adaptorSignatures() {
+        val privkeys = listOf(
+            Hex.decode("EEC1CB7D1B7254C5CAB0D9C61AB02E643D464A59FE6C96A7EFE871F07C5AEF54"),
+            Hex.decode("487356F98AA7A0DC5E0E0F61B4CDA5D1A5B4C59F1B1E5A70E0D55C11FE0A99A1")
+        )
+        val pubkeys = privkeys.map { Secp256k1.pubkeyCreate(it) }.toTypedArray()
+        val keyaggCache = ByteArray(Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        val aggXonly = Secp256k1.musigPubkeyAgg(pubkeys, keyaggCache)
+        val msg = ByteArray(32) { 0x42 }
+
+        val nonces = privkeys.mapIndexed { i, sk -> Secp256k1.musigNonceGenCounter((i + 1).toULong(), sk, msg, keyaggCache, null) }
+        val secnonces = nonces.map { it.copyOfRange(0, Secp256k1.MUSIG2_SECRET_NONCE_SIZE) }
+        val pubnonces = nonces.map { it.copyOfRange(Secp256k1.MUSIG2_SECRET_NONCE_SIZE, Secp256k1.MUSIG2_SECRET_NONCE_SIZE + Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE) }
+        val aggnonce = Secp256k1.musigNonceAgg(pubnonces.toTypedArray())
+        val session = Secp256k1.musigNonceProcess(aggnonce, msg, keyaggCache)
+
+        val nonceParity = Secp256k1.musigNonceParity(session)
+        assertTrue(nonceParity == 0 || nonceParity == 1)
+
+        val psigs = privkeys.mapIndexed { i, sk -> Secp256k1.musigPartialSign(secnonces[i], sk, keyaggCache, session) }
+        psigs.forEachIndexed { i, psig -> assertEquals(1, Secp256k1.musigPartialSigVerify(psig, pubnonces[i], pubkeys[i], keyaggCache, session)) }
+        val preSig = Secp256k1.musigPartialSigAgg(session, psigs.toTypedArray())
+        // This session was created without an adaptor, so the aggregated signature is a valid schnorr signature.
+        assertTrue(Secp256k1.verifySchnorr(preSig, msg, aggXonly))
+
+        // Adapting a pre-signature with an adaptor secret and extracting it back must be a round-trip.
+        val adaptorSecret = Hex.decode("0B1E9E1C5FDC56B9E90201C0C14DE3A9FF4A0DF7B839D18A29E9087F612480B7")
+        val adapted = Secp256k1.musigAdapt(preSig, adaptorSecret, nonceParity)
+        assertEquals(64, adapted.size)
+        val recovered = Secp256k1.musigExtractAdaptor(adapted, preSig, nonceParity)
+        assertContentEquals(adaptorSecret, recovered)
+
+        assertFails { Secp256k1.musigAdapt(preSig, adaptorSecret, 2) }
+        assertFails { Secp256k1.musigAdapt(preSig.copyOf(63), adaptorSecret, nonceParity) }
+        assertFails { Secp256k1.musigExtractAdaptor(adapted, preSig.copyOf(63), nonceParity) }
+    }
+
     /**
      * The key aggregation cache, session and secret nonce are opaque blobs that libsecp256k1 tags with a magic prefix
      * and validates with ARG_CHECK, whose default handler aborts the process. Passing a blob that has the right size
@@ -323,7 +377,9 @@ class Musig2Test {
         assertFails { Secp256k1.musigNonceGenCounter(1UL, privkey, msg, badCache, null) }
         assertFails { Secp256k1.musigPubkeyTweakAdd(badCache, tweak) }
         assertFails { Secp256k1.musigPubkeyXonlyTweakAdd(badCache, tweak) }
+        assertFails { Secp256k1.musigPubkeyGet(badCache) }
         assertFails { Secp256k1.musigNonceProcess(aggnonce, msg, badCache) }
+        assertFails { Secp256k1.musigNonceParity(badSession) }
         assertFails { Secp256k1.musigPartialSign(badSecnonce, privkey, keyaggCache, session) }
         assertFails { Secp256k1.musigPartialSign(secnonce, privkey, badCache, session) }
         assertFails { Secp256k1.musigPartialSign(secnonce, privkey, keyaggCache, badSession) }
