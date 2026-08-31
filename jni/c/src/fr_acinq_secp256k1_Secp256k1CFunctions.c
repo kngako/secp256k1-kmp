@@ -9,6 +9,7 @@
 #include "include/secp256k1.h"
 #include "include/secp256k1_ecdh.h"
 #include "include/secp256k1_musig.h"
+#include "include/secp256k1_frost.h"
 #include "include/secp256k1_recovery.h"
 #include "include/secp256k1_schnorrsig.h"
 
@@ -24,6 +25,12 @@
 static const unsigned char MUSIG_KEYAGG_CACHE_MAGIC[4] = { 0xf4, 0xad, 0xbb, 0xdf };
 static const unsigned char MUSIG_SECNONCE_MAGIC[4] = { 0x22, 0x0e, 0xdc, 0xf1 };
 static const unsigned char MUSIG_SESSION_MAGIC[4] = { 0x9d, 0xed, 0xe9, 0x17 };
+
+/* Same thing for the opaque frost objects passed back to libsecp256k1 as raw byte arrays.
+ * Keep in sync with native/secp256k1/src/modules/frost/{keygen,session}_impl.h. */
+static const unsigned char FROST_SECNONCE_MAGIC[4] = { 0x5c, 0xcf, 0xb9, 0x99 };
+static const unsigned char FROST_TWEAK_CACHE_MAGIC[4] = { 0x8d, 0x86, 0xb5, 0x01 };
+static const unsigned char FROST_SESSION_MAGIC[4] = { 0x34, 0xb5, 0x27, 0x3d };
 
 #define CHECKMAGIC(data, magic, message) CHECKRESULT(memcmp((data), (magic), 4) != 0, message)
 
@@ -1199,4 +1206,669 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     CHECKRESULT(!result, "secp256k1_musig_extract_adaptor failed");
 
     return copy_bytes_to_java(penv, sec_adaptor32, 32);
+}
+
+
+/* The frost_xxx() helpers below all return 1 on success, and on failure throw a
+ * Secp256k1Exception describing what was wrong with the argument and return 0.
+ * They must not be called when an exception is already pending: callers are
+ * expected to return as soon as one of them fails. */
+
+/* Copies a java byte array of arbitrary size into a freshly malloc'd buffer (a NULL
+ * array becomes a NULL buffer of size 0). The caller must free the buffer. */
+static inline int get_var_bytes(JNIEnv* penv, jbyteArray jbytes, unsigned char** out, size_t* out_size, const char* name)
+{
+    jsize len;
+    unsigned char* bytes;
+
+    if (jbytes == NULL) {
+        *out = NULL;
+        *out_size = 0;
+        return 1;
+    }
+    len = (*penv)->GetArrayLength(penv, jbytes);
+    bytes = malloc(len > 0 ? (size_t)len : 1);
+    if (bytes == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return 0;
+    }
+    (*penv)->GetByteArrayRegion(penv, jbytes, 0, len, (jbyte*)bytes);
+    *out = bytes;
+    *out_size = (size_t)len;
+    return 1;
+}
+
+/* Copies a java int array into a freshly malloc'd uint32_t array. Signer identifiers are
+ * small non-negative values (at most SECP256K1_FROST_MAX_PARTICIPANTS - 1), so negative
+ * entries are rejected here instead of wrapping around. The caller must free the array. */
+static inline uint32_t* get_signer_ids(JNIEnv* penv, jintArray jids, size_t* count)
+{
+    jsize i, n;
+    jint* elems;
+    uint32_t* ids;
+
+    n = (*penv)->GetArrayLength(penv, jids);
+    elems = (*penv)->GetIntArrayElements(penv, jids, NULL);
+    if (elems == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    ids = malloc(sizeof(uint32_t) * (n > 0 ? (size_t)n : 1));
+    if (ids == NULL) {
+        (*penv)->ReleaseIntArrayElements(penv, jids, elems, JNI_ABORT);
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        if (elems[i] < 0) {
+            free(ids);
+            (*penv)->ReleaseIntArrayElements(penv, jids, elems, JNI_ABORT);
+            JNI_ThrowSecp256k1(penv, "signer ids cannot be negative");
+            return NULL;
+        }
+        ids[i] = (uint32_t)elems[i];
+    }
+    (*penv)->ReleaseIntArrayElements(penv, jids, elems, JNI_ABORT);
+    *count = (size_t)n;
+    return ids;
+}
+
+/* Parses an array of serialized public keys into a freshly malloc'd secp256k1_pubkey
+ * array. The caller must free the array. */
+static inline secp256k1_pubkey* get_pubshares(JNIEnv* penv, const secp256k1_context* ctx, jobjectArray jpubshares, size_t* count)
+{
+    secp256k1_pubkey* pubshares;
+    jbyteArray jpubshare;
+    jsize i, n;
+
+    n = (*penv)->GetArrayLength(penv, jpubshares);
+    pubshares = calloc(n > 0 ? (size_t)n : 1, sizeof(secp256k1_pubkey));
+    if (pubshares == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        jpubshare = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jpubshares, i);
+        if (!get_pubkey(penv, ctx, jpubshare, &pubshares[i])) {
+            (*penv)->DeleteLocalRef(penv, jpubshare);
+            free(pubshares);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jpubshare);
+    }
+    *count = (size_t)n;
+    return pubshares;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_trusted_dealer_keygen
+ * Signature: (J[BII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1trusted_1dealer_1keygen(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jthreshseckey, jint jnparticipants, jint jthreshold)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char threshseckey[32];
+    unsigned char* secshares;
+    unsigned char* out;
+    secp256k1_pubkey thresh_pk;
+    secp256k1_pubkey* pubshares;
+    size_t n, i, size;
+    int result = 0;
+    jbyteArray jout;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jthreshseckey, threshseckey, "threshold secret key")) return NULL;
+    CHECKRESULT(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants");
+    CHECKRESULT(jthreshold < 1 || jthreshold > jnparticipants, "invalid threshold");
+    n = (size_t)jnparticipants;
+
+    secshares = malloc(32 * n);
+    CHECKRESULT(secshares == NULL, "memory allocation failed");
+    pubshares = calloc(n, sizeof(secp256k1_pubkey));
+    CHECKRESULT1(pubshares == NULL, "memory allocation failed", free(secshares));
+    out = malloc(65 + 32 * n + 65 * n);
+    CHECKRESULT1(out == NULL, "memory allocation failed", free(secshares); free(pubshares));
+
+    result = secp256k1_frost_trusted_dealer_keygen(ctx, secshares, &thresh_pk, pubshares, n, (uint32_t)jthreshold, threshseckey);
+    CHECKRESULT1(!result, "secp256k1_frost_trusted_dealer_keygen failed", free(secshares); free(pubshares); free(out));
+
+    size = 65;
+    result = secp256k1_ec_pubkey_serialize(ctx, out, &size, &thresh_pk, SECP256K1_EC_UNCOMPRESSED);
+    CHECKRESULT1(!result, "secp256k1_ec_pubkey_serialize failed", free(secshares); free(pubshares); free(out));
+    memcpy(out + 65, secshares, 32 * n);
+    for (i = 0; i < n; i++) {
+        size = 65;
+        result = secp256k1_ec_pubkey_serialize(ctx, out + 65 + 32 * n + 65 * i, &size, &pubshares[i], SECP256K1_EC_UNCOMPRESSED);
+        CHECKRESULT1(!result, "secp256k1_ec_pubkey_serialize failed", free(secshares); free(pubshares); free(out));
+    }
+
+    jout = copy_bytes_to_java(penv, out, 65 + 32 * n + 65 * n);
+    free(secshares);
+    free(pubshares);
+    free(out);
+    return jout;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_threshold_info_validate
+ * Signature: (J[B[[BI)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1threshold_1info_1validate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jthreshpk, jobjectArray jpubshares, jint jthreshold)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_pubkey thresh_pk;
+    secp256k1_pubkey* pubshares;
+    size_t n;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return 0;
+    CHECKRESULT(jpubshares == NULL, "public shares cannot be null");
+    pubshares = get_pubshares(penv, ctx, jpubshares, &n);
+    if (pubshares == NULL) return 0;
+    CHECKRESULT1(n < 1, "public shares cannot be empty", free(pubshares));
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(pubshares));
+
+    result = secp256k1_frost_threshold_info_validate(ctx, &thresh_pk, pubshares, n, (uint32_t)jthreshold);
+    free(pubshares);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_tweak_cache_init
+ * Signature: (J[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1tweak_1cache_1init(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jthreshpk)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_pubkey thresh_pk;
+    secp256k1_frost_tweak_cache cache;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return NULL;
+
+    result = secp256k1_frost_tweak_cache_init(ctx, &cache, &thresh_pk);
+    CHECKRESULT(!result, "secp256k1_frost_tweak_cache_init failed");
+
+    return copy_bytes_to_java(penv, cache.data, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_tweaked_pubkey_get
+ * Signature: (J[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1tweaked_1pubkey_1get(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtweakcache)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_tweak_cache cache;
+    secp256k1_xonly_pubkey tweaked_pk;
+    unsigned char pub[32];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, cache.data, "tweak cache")) return NULL;
+    CHECKMAGIC(cache.data, FROST_TWEAK_CACHE_MAGIC, "invalid tweak cache");
+
+    result = secp256k1_frost_tweaked_pubkey_get(ctx, &tweaked_pk, &cache);
+    CHECKRESULT(!result, "secp256k1_frost_tweaked_pubkey_get failed");
+
+    result = secp256k1_xonly_pubkey_serialize(ctx, pub, &tweaked_pk);
+    CHECKRESULT(!result, "secp256k1_xonly_pubkey_serialize failed");
+
+    return copy_bytes_to_java(penv, pub, 32);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_pubkey_xonly_tweak_add
+ * Signature: (J[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1pubkey_1xonly_1tweak_1add(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtweakcache, jbyteArray jtweak32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_tweak_cache cache;
+    secp256k1_xonly_pubkey tweaked_pk;
+    unsigned char tweak32[32], pub[32];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, cache.data, "tweak cache")) return NULL;
+    CHECKMAGIC(cache.data, FROST_TWEAK_CACHE_MAGIC, "invalid tweak cache");
+    if (!get_bytes32(penv, jtweak32, tweak32, "tweak")) return NULL;
+
+    result = secp256k1_frost_pubkey_xonly_tweak_add(ctx, &tweaked_pk, &cache, tweak32);
+    CHECKRESULT(!result, "secp256k1_frost_pubkey_xonly_tweak_add failed");
+
+    result = secp256k1_xonly_pubkey_serialize(ctx, pub, &tweaked_pk);
+    CHECKRESULT(!result, "secp256k1_xonly_pubkey_serialize failed");
+
+    /* write the updated cache back into the caller's array */
+    (*penv)->SetByteArrayRegion(penv, jtweakcache, 0, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, (const jbyte*)cache.data);
+
+    return copy_bytes_to_java(penv, pub, 32);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_pubkey_ec_tweak_add
+ * Signature: (J[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1pubkey_1ec_1tweak_1add(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtweakcache, jbyteArray jtweak32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_tweak_cache cache;
+    secp256k1_xonly_pubkey tweaked_pk;
+    unsigned char tweak32[32], pub[32];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, cache.data, "tweak cache")) return NULL;
+    CHECKMAGIC(cache.data, FROST_TWEAK_CACHE_MAGIC, "invalid tweak cache");
+    if (!get_bytes32(penv, jtweak32, tweak32, "tweak")) return NULL;
+
+    result = secp256k1_frost_pubkey_ec_tweak_add(ctx, &tweaked_pk, &cache, tweak32);
+    CHECKRESULT(!result, "secp256k1_frost_pubkey_ec_tweak_add failed");
+
+    result = secp256k1_xonly_pubkey_serialize(ctx, pub, &tweaked_pk);
+    CHECKRESULT(!result, "secp256k1_xonly_pubkey_serialize failed");
+
+    /* write the updated cache back into the caller's array */
+    (*penv)->SetByteArrayRegion(penv, jtweakcache, 0, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, (const jbyte*)cache.data);
+
+    return copy_bytes_to_java(penv, pub, 32);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_nonce_gen
+ * Signature: (J[B[B[B[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1nonce_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession_secrand32, jbyteArray jsecshare32, jbyteArray jpubshare, jbyteArray jthreshpk32, jbyteArray jmsg, jbyteArray jextra_in)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_secnonce secnonce;
+    secp256k1_frost_pubnonce pubnonce;
+    secp256k1_pubkey pubshare;
+    unsigned char session_secrand32[32], secshare32[32], threshpk32[32];
+    unsigned char* msg = NULL;
+    unsigned char* extra_in = NULL;
+    size_t msglen = 0, extra_in_len = 0;
+    unsigned char nonce[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SECRET_NONCE_SIZE + fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jsession_secrand32, session_secrand32, "session random")) return NULL;
+    if (jsecshare32 != NULL && !get_bytes32(penv, jsecshare32, secshare32, "secret share")) return NULL;
+    if (jpubshare != NULL && !get_pubkey(penv, ctx, jpubshare, &pubshare)) return NULL;
+    if (jthreshpk32 != NULL && !get_bytes32(penv, jthreshpk32, threshpk32, "threshold public key")) return NULL;
+    if (!get_var_bytes(penv, jmsg, &msg, &msglen, "message")) return NULL;
+    if (!get_var_bytes(penv, jextra_in, &extra_in, &extra_in_len, "extra input")) {
+        free(msg);
+        return NULL;
+    }
+
+    result = secp256k1_frost_nonce_gen(ctx, &secnonce, &pubnonce, session_secrand32,
+                                       jsecshare32 == NULL ? NULL : secshare32,
+                                       jpubshare == NULL ? NULL : &pubshare,
+                                       jthreshpk32 == NULL ? NULL : threshpk32,
+                                       msg, msglen, extra_in, extra_in_len);
+    free(msg);
+    free(extra_in);
+    CHECKRESULT(!result, "secp256k1_frost_nonce_gen failed");
+
+    memcpy(nonce, secnonce.data, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SECRET_NONCE_SIZE);
+    result = secp256k1_frost_pubnonce_serialize(ctx, nonce + fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SECRET_NONCE_SIZE, &pubnonce);
+    CHECKRESULT(!result, "secp256k1_frost_pubnonce_serialize failed");
+
+    return copy_bytes_to_java(penv, nonce, sizeof(nonce));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_nonce_agg
+ * Signature: (J[[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1nonce_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jnonces)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char in66[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    secp256k1_frost_pubnonce* pubnonces;
+    secp256k1_frost_pubnonce** pubnonce_ptrs;
+    secp256k1_frost_aggnonce combined;
+    jbyteArray jnonce;
+    size_t count;
+    size_t i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jnonces == NULL, "public nonces cannot be null");
+
+    count = (*penv)->GetArrayLength(penv, jnonces);
+    CHECKRESULT(count == 0, "public nonces count cannot be 0");
+
+    pubnonces = calloc(count, sizeof(secp256k1_frost_pubnonce));
+    CHECKRESULT(pubnonces == NULL, "memory allocation error");
+    pubnonce_ptrs = calloc(count, sizeof(secp256k1_frost_pubnonce*));
+    CHECKRESULT1(pubnonce_ptrs == NULL, "memory allocation error", free(pubnonces));
+
+    for (i = 0; i < count; i++) {
+        pubnonce_ptrs[i] = &(pubnonces[i]);
+        jnonce = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jnonces, i);
+        if (!get_bytes(penv, jnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, in66, "public nonce")) {
+            free(pubnonce_ptrs);
+            free(pubnonces);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jnonce);
+        result = secp256k1_frost_pubnonce_parse(ctx, pubnonce_ptrs[i], in66);
+        CHECKRESULT1(!result, "secp256k1_frost_pubnonce_parse failed", free(pubnonce_ptrs); free(pubnonces));
+    }
+    result = secp256k1_frost_nonce_agg(ctx, &combined, NULL, (const secp256k1_frost_pubnonce* const*)pubnonce_ptrs, count);
+    free(pubnonce_ptrs);
+    free(pubnonces);
+    CHECKRESULT(!result, "secp256k1_frost_nonce_agg failed");
+
+    result = secp256k1_frost_aggnonce_serialize(ctx, in66, &combined);
+    CHECKRESULT(!result, "secp256k1_frost_aggnonce_serialize failed");
+
+    return copy_bytes_to_java(penv, in66, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_session_init
+ * Signature: (J[B[I[[BII[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1session_1init(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jaggnonce, jintArray jids, jobjectArray jpubshares, jint jnparticipants, jint jthreshold, jbyteArray jtweakcache, jbyteArray jmsg)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char in66[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    secp256k1_frost_aggnonce aggnonce;
+    secp256k1_frost_tweak_cache tweakcache;
+    secp256k1_frost_session session;
+    secp256k1_pubkey* pubshares = NULL;
+    uint32_t* ids = NULL;
+    unsigned char* msg = NULL;
+    size_t n_pubshares = 0, n_signers = 0, msglen = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jaggnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, in66, "aggregate nonce")) return NULL;
+    result = secp256k1_frost_aggnonce_parse(ctx, &aggnonce, in66);
+    CHECKRESULT(!result, "secp256k1_frost_aggnonce_parse failed");
+
+    CHECKRESULT(jids == NULL, "signer ids cannot be null");
+    ids = get_signer_ids(penv, jids, &n_signers);
+    if (ids == NULL) return NULL;
+    CHECKRESULT1(n_signers < 1, "signer ids cannot be empty", free(ids));
+
+    if (jpubshares != NULL) {
+        pubshares = get_pubshares(penv, ctx, jpubshares, &n_pubshares);
+        if (pubshares == NULL) {
+            free(ids);
+            return NULL;
+        }
+        CHECKRESULT1(n_pubshares != n_signers, "public shares count must match signer ids count", free(ids); free(pubshares));
+    }
+
+    CHECKRESULT1(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants", free(ids); free(pubshares));
+    CHECKRESULT1(jthreshold < 1 || jthreshold > jnparticipants, "invalid threshold", free(ids); free(pubshares));
+    CHECKRESULT1((jint)n_signers < jthreshold || (jint)n_signers > jnparticipants, "invalid number of signers", free(ids); free(pubshares));
+
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, tweakcache.data, "tweak cache")) {
+        free(ids);
+        free(pubshares);
+        return NULL;
+    }
+    if (memcmp(tweakcache.data, FROST_TWEAK_CACHE_MAGIC, 4) != 0) {
+        free(ids);
+        free(pubshares);
+        JNI_ThrowSecp256k1(penv, "invalid tweak cache");
+        return NULL;
+    }
+    if (!get_var_bytes(penv, jmsg, &msg, &msglen, "message")) {
+        free(ids);
+        free(pubshares);
+        return NULL;
+    }
+
+    result = secp256k1_frost_session_init(ctx, &session, &aggnonce, ids, pubshares, n_signers, (size_t)jnparticipants, (uint32_t)jthreshold, &tweakcache, msg, msglen);
+    free(ids);
+    free(pubshares);
+    free(msg);
+    CHECKRESULT(!result, "secp256k1_frost_session_init failed");
+
+    return copy_bytes_to_java(penv, session.data, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SESSION_SIZE);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_sign
+ * Signature: (J[B[B[B[I[[BI)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsecnonce, jbyteArray jsecshare32, jbyteArray jsession, jintArray jids, jobjectArray jpubshares, jint jmyid)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_secnonce secnonce;
+    secp256k1_frost_session session;
+    secp256k1_frost_partial_sig psig;
+    secp256k1_pubkey* pubshares = NULL;
+    uint32_t* ids = NULL;
+    unsigned char secshare32[32], sig[32];
+    size_t n_pubshares = 0, n_signers = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jsecnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SECRET_NONCE_SIZE, secnonce.data, "secret nonce")) return NULL;
+    CHECKMAGIC(secnonce.data, FROST_SECNONCE_MAGIC, "invalid secret nonce");
+    if (!get_bytes32(penv, jsecshare32, secshare32, "secret share")) return NULL;
+    if (!get_bytes(penv, jsession, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SESSION_SIZE, session.data, "session")) return NULL;
+    CHECKMAGIC(session.data, FROST_SESSION_MAGIC, "invalid session");
+
+    CHECKRESULT(jids == NULL, "signer ids cannot be null");
+    ids = get_signer_ids(penv, jids, &n_signers);
+    if (ids == NULL) return NULL;
+    CHECKRESULT1(n_signers < 1, "signer ids cannot be empty", free(ids));
+
+    if (jpubshares != NULL) {
+        pubshares = get_pubshares(penv, ctx, jpubshares, &n_pubshares);
+        if (pubshares == NULL) {
+            free(ids);
+            return NULL;
+        }
+        CHECKRESULT1(n_pubshares != n_signers, "public shares count must match signer ids count", free(ids); free(pubshares));
+    }
+
+    result = secp256k1_frost_sign(ctx, &psig, &secnonce, secshare32, &session, ids, pubshares, n_signers, (uint32_t)jmyid);
+    free(ids);
+    free(pubshares);
+    CHECKRESULT(!result, "secp256k1_frost_sign failed");
+
+    result = secp256k1_frost_partial_sig_serialize(ctx, sig, &psig);
+    CHECKRESULT(!result, "secp256k1_frost_partial_sig_serialize failed");
+
+    return copy_bytes_to_java(penv, sig, 32);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_deterministic_sign
+ * Signature: (J[BI[B[I[[BII[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1deterministic_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsecshare32, jint jmyid, jbyteArray jaggothernonce, jintArray jids, jobjectArray jpubshares, jint jnparticipants, jint jthreshold, jbyteArray jtweakcache, jbyteArray jmsg, jbyteArray jauxrand32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char in66[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    secp256k1_frost_aggnonce aggothernonce;
+    secp256k1_frost_tweak_cache tweakcache;
+    secp256k1_frost_partial_sig psig;
+    secp256k1_frost_pubnonce pubnonce;
+    secp256k1_pubkey* pubshares = NULL;
+    uint32_t* ids = NULL;
+    unsigned char* msg = NULL;
+    unsigned char secshare32[32], auxrand32[32];
+    unsigned char out[32 + fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    size_t n_pubshares = 0, n_signers = 0, msglen = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jsecshare32, secshare32, "secret share")) return NULL;
+
+    if (jaggothernonce != NULL) {
+        if (!get_bytes(penv, jaggothernonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, in66, "aggregate nonce")) return NULL;
+        result = secp256k1_frost_aggnonce_parse(ctx, &aggothernonce, in66);
+        CHECKRESULT(!result, "secp256k1_frost_aggnonce_parse failed");
+    }
+
+    CHECKRESULT(jids == NULL, "signer ids cannot be null");
+    ids = get_signer_ids(penv, jids, &n_signers);
+    if (ids == NULL) return NULL;
+    CHECKRESULT1(n_signers < 1, "signer ids cannot be empty", free(ids));
+
+    if (jpubshares != NULL) {
+        pubshares = get_pubshares(penv, ctx, jpubshares, &n_pubshares);
+        if (pubshares == NULL) {
+            free(ids);
+            return NULL;
+        }
+        CHECKRESULT1(n_pubshares != n_signers, "public shares count must match signer ids count", free(ids); free(pubshares));
+    }
+
+    CHECKRESULT1(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants", free(ids); free(pubshares));
+    CHECKRESULT1(jthreshold < 1 || jthreshold > jnparticipants, "invalid threshold", free(ids); free(pubshares));
+
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, tweakcache.data, "tweak cache")) {
+        free(ids);
+        free(pubshares);
+        return NULL;
+    }
+    if (memcmp(tweakcache.data, FROST_TWEAK_CACHE_MAGIC, 4) != 0) {
+        free(ids);
+        free(pubshares);
+        JNI_ThrowSecp256k1(penv, "invalid tweak cache");
+        return NULL;
+    }
+    if (!get_var_bytes(penv, jmsg, &msg, &msglen, "message")) {
+        free(ids);
+        free(pubshares);
+        return NULL;
+    }
+    if (jauxrand32 != NULL && !get_bytes32(penv, jauxrand32, auxrand32, "auxiliary random data")) {
+        free(ids);
+        free(pubshares);
+        free(msg);
+        return NULL;
+    }
+
+    result = secp256k1_frost_deterministic_sign(ctx, &psig, &pubnonce, secshare32, (uint32_t)jmyid,
+                                                jaggothernonce == NULL ? NULL : &aggothernonce,
+                                                ids, pubshares, n_signers, (size_t)jnparticipants, (uint32_t)jthreshold,
+                                                &tweakcache, msg, msglen, jauxrand32 == NULL ? NULL : auxrand32);
+    free(ids);
+    free(pubshares);
+    free(msg);
+    CHECKRESULT(!result, "secp256k1_frost_deterministic_sign failed");
+
+    result = secp256k1_frost_partial_sig_serialize(ctx, out, &psig);
+    CHECKRESULT(!result, "secp256k1_frost_partial_sig_serialize failed");
+    result = secp256k1_frost_pubnonce_serialize(ctx, out + 32, &pubnonce);
+    CHECKRESULT(!result, "secp256k1_frost_pubnonce_serialize failed");
+
+    return copy_bytes_to_java(penv, out, sizeof(out));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_partial_sig_verify
+ * Signature: (J[B[B[B[B[II)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1partial_1sig_1verify(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jpsig, jbyteArray jpubnonce, jbyteArray jpubshare, jbyteArray jsession, jintArray jids, jint jsignerindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_partial_sig psig;
+    secp256k1_frost_pubnonce pubnonce;
+    secp256k1_pubkey pubshare;
+    secp256k1_frost_session session;
+    uint32_t* ids = NULL;
+    unsigned char psig_buffer[32];
+    unsigned char nonce_buffer[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    size_t n_signers = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jpsig, psig_buffer, "partial signature")) return 0;
+    if (!get_bytes(penv, jpubnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, nonce_buffer, "public nonce")) return 0;
+    if (!get_pubkey(penv, ctx, jpubshare, &pubshare)) return 0;
+    if (!get_bytes(penv, jsession, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SESSION_SIZE, session.data, "session")) return 0;
+    CHECKMAGIC(session.data, FROST_SESSION_MAGIC, "invalid session");
+
+    CHECKRESULT(jids == NULL, "signer ids cannot be null");
+    ids = get_signer_ids(penv, jids, &n_signers);
+    if (ids == NULL) return 0;
+    CHECKRESULT1(n_signers < 1, "signer ids cannot be empty", free(ids));
+    CHECKRESULT1(jsignerindex < 0 || (size_t)jsignerindex >= n_signers, "invalid signer index", free(ids));
+
+    result = secp256k1_frost_partial_sig_parse(ctx, &psig, psig_buffer);
+    CHECKRESULT1(!result, "secp256k1_frost_partial_sig_parse failed", free(ids));
+    result = secp256k1_frost_pubnonce_parse(ctx, &pubnonce, nonce_buffer);
+    CHECKRESULT1(!result, "secp256k1_frost_pubnonce_parse failed", free(ids));
+
+    result = secp256k1_frost_partial_sig_verify(ctx, &psig, &pubnonce, &pubshare, &session, ids, n_signers, (size_t)jsignerindex);
+    free(ids);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_partial_sig_agg
+ * Signature: (J[B[[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1partial_1sig_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jobjectArray jpsigs)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_session session;
+    secp256k1_frost_partial_sig* psigs;
+    secp256k1_frost_partial_sig** psig_ptrs;
+    unsigned char sig64[64];
+    jbyteArray jpsig;
+    size_t count;
+    size_t i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jsession, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SESSION_SIZE, session.data, "session")) return NULL;
+    CHECKMAGIC(session.data, FROST_SESSION_MAGIC, "invalid session");
+
+    CHECKRESULT(jpsigs == NULL, "partial signatures cannot be null");
+    count = (*penv)->GetArrayLength(penv, jpsigs);
+    CHECKRESULT(count == 0, "partial sigs count cannot be 0");
+
+    psigs = calloc(count, sizeof(secp256k1_frost_partial_sig));
+    CHECKRESULT(psigs == NULL, "memory allocation error");
+    psig_ptrs = calloc(count, sizeof(secp256k1_frost_partial_sig*));
+    CHECKRESULT1(psig_ptrs == NULL, "memory allocation error", free(psigs));
+
+    for (i = 0; i < count; i++) {
+        psig_ptrs[i] = &(psigs[i]);
+        jpsig = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jpsigs, i);
+        if (!get_bytes(penv, jpsig, 32, sig64, "partial signature")) {
+            free(psig_ptrs);
+            free(psigs);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jpsig);
+        result = secp256k1_frost_partial_sig_parse(ctx, psig_ptrs[i], sig64);
+        CHECKRESULT1(!result, "secp256k1_frost_partial_sig_parse failed", free(psig_ptrs); free(psigs));
+    }
+    result = secp256k1_frost_partial_sig_agg(ctx, sig64, NULL, &session, (const secp256k1_frost_partial_sig* const*)psig_ptrs, count);
+    free(psig_ptrs);
+    free(psigs);
+    CHECKRESULT(!result, "secp256k1_frost_partial_sig_agg failed");
+
+    return copy_bytes_to_java(penv, sig64, 64);
 }

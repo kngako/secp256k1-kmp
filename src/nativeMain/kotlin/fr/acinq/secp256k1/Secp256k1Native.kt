@@ -5,7 +5,7 @@ import platform.posix.memcpy
 import platform.posix.size_tVar
 import secp256k1.*
 
-private fun ByteArray.checkMusigMagic(magic: ByteArray, name: String) {
+private fun ByteArray.checkMagic(magic: ByteArray, name: String) {
     if (size < magic.size || !magic.indices.all { this[it] == magic[it] }) throw Secp256k1Exception("invalid $name")
 }
 
@@ -14,7 +14,7 @@ private fun ByteArray.checkMusigMagic(magic: ByteArray, name: String) {
  * aborts the process. Returning from here makes the libsecp256k1 call fail with 0, which the
  * bindings below already turn into a [Secp256k1Exception]. It is deliberately stateless: the
  * callback and its data pointer live on the context, which is shared by every thread, so recording
- * anything here would race. The [checkMusigMagic] checks are the primary defence and this is the
+ * anything here would race. The [checkMagic] checks are the primary defence and this is the
  * backstop for anything they miss.
  */
 @OptIn(ExperimentalForeignApi::class)
@@ -326,7 +326,7 @@ public object Secp256k1Native : Secp256k1 {
         privkey?.let { require(it.size == 32) }
         msg32?.let { require(it.size == 32) }
         keyaggCache?.let { require(it.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) }
-        keyaggCache?.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        keyaggCache?.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
         extraInput32?.let { require(it.size == 32) }
 
         val nonce = memScoped {
@@ -362,7 +362,7 @@ public object Secp256k1Native : Secp256k1 {
         require(privkey.size ==32)
         msg32?.let { require(it.size == 32) }
         keyaggCache?.let { require(it.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) }
-        keyaggCache?.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        keyaggCache?.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
         extraInput32?.let { require(it.size == 32) }
         val nonce = memScoped {
             val secnonce = alloc<secp256k1_musig_secnonce>()
@@ -415,7 +415,7 @@ public object Secp256k1Native : Secp256k1 {
     override fun musigPubkeyTweakAdd(keyaggCache: ByteArray, tweak32: ByteArray): ByteArray {
         require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
         require(tweak32.size == 32)
-        keyaggCache.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
         memScoped {
             val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
             memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
@@ -429,7 +429,7 @@ public object Secp256k1Native : Secp256k1 {
     override fun musigPubkeyXonlyTweakAdd(keyaggCache: ByteArray, tweak32: ByteArray): ByteArray {
         require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
         require(tweak32.size == 32)
-        keyaggCache.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
         memScoped {
             val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
             memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
@@ -444,7 +444,7 @@ public object Secp256k1Native : Secp256k1 {
         require(aggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
         require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
         require(msg32.size == 32)
-        keyaggCache.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
         memScoped {
             val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
             memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
@@ -463,8 +463,8 @@ public object Secp256k1Native : Secp256k1 {
         require(privkey.size == 32)
         require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
         require(session.size == Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE)
-        keyaggCache.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
-        session.checkMusigMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        session.checkMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
         if (!musigNonceValidate(secnonce, pubkeyCreate(privkey))) throw Secp256k1Exception("invalid secret nonce")
 
         memScoped {
@@ -490,8 +490,8 @@ public object Secp256k1Native : Secp256k1 {
         require(pubkey.size == 33 || pubkey.size == 65)
         require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
         require(session.size == Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE)
-        keyaggCache.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
-        session.checkMusigMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        session.checkMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
 
         memScoped {
             val nPSig = allocPartialSig(psig)
@@ -509,7 +509,7 @@ public object Secp256k1Native : Secp256k1 {
         require(session.size == Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE)
         require(psigs.isNotEmpty())
         psigs.forEach { require(it.size == 32) }
-        session.checkMusigMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
+        session.checkMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
         memScoped {
             val nSession = alloc<secp256k1_musig_session>()
             memcpy(nSession.ptr, toNat(session), Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE.toULong())
@@ -522,7 +522,7 @@ public object Secp256k1Native : Secp256k1 {
 
     override fun musigPubkeyGet(keyaggCache: ByteArray): ByteArray {
         require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
-        keyaggCache.checkMusigMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
         memScoped {
             val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
             memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
@@ -534,7 +534,7 @@ public object Secp256k1Native : Secp256k1 {
 
     override fun musigNonceParity(session: ByteArray): Int {
         require(session.size == Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE)
-        session.checkMusigMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
+        session.checkMagic(Secp256k1.MUSIG_SESSION_MAGIC, "session")
         memScoped {
             val nSession = alloc<secp256k1_musig_session>()
             memcpy(nSession.ptr, toNat(session), Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE.toULong())
@@ -563,6 +563,282 @@ public object Secp256k1Native : Secp256k1 {
             val nSecAdaptor32 = allocArray<UByteVar>(32)
             secp256k1_musig_extract_adaptor(ctx, nSecAdaptor32, toNat(sig64), toNat(preSig64), nonceParity).requireSuccess("secp256k1_musig_extract_adaptor() failed")
             return nSecAdaptor32.readBytes(32)
+        }
+    }
+
+    private fun MemScope.allocFrostPubnonce(pubnonce: ByteArray): secp256k1_frost_pubnonce {
+        val nat = toNat(pubnonce)
+        val nPubnonce = alloc<secp256k1_frost_pubnonce>()
+        secp256k1_frost_pubnonce_parse(ctx, nPubnonce.ptr, nat).requireSuccess("secp256k1_frost_pubnonce_parse() failed")
+        return nPubnonce
+    }
+
+    private fun MemScope.allocFrostPartialSig(psig: ByteArray): secp256k1_frost_partial_sig {
+        val nat = toNat(psig)
+        val nPsig = alloc<secp256k1_frost_partial_sig>()
+        secp256k1_frost_partial_sig_parse(ctx, nPsig.ptr, nat).requireSuccess("secp256k1_frost_partial_sig_parse() failed")
+        return nPsig
+    }
+
+    private fun MemScope.allocFrostTweakCache(tweakCache: ByteArray): secp256k1_frost_tweak_cache {
+        tweakCache.checkMagic(Secp256k1.FROST_TWEAK_CACHE_MAGIC, "tweak cache")
+        val nCache = alloc<secp256k1_frost_tweak_cache>()
+        memcpy(nCache.ptr, toNat(tweakCache), Secp256k1.FROST_TWEAK_CACHE_SIZE.toULong())
+        return nCache
+    }
+
+    private fun MemScope.allocFrostSession(session: ByteArray): secp256k1_frost_session {
+        session.checkMagic(Secp256k1.FROST_SESSION_MAGIC, "session")
+        val nSession = alloc<secp256k1_frost_session>()
+        memcpy(nSession.ptr, toNat(session), Secp256k1.FROST_SESSION_SIZE.toULong())
+        return nSession
+    }
+
+    private fun MemScope.allocPubshares(pubshares: Array<ByteArray>?): CPointer<secp256k1_pubkey>? =
+        pubshares?.let { shares ->
+            shares.forEach { require(it.size == 33 || it.size == 65) }
+            val nShares = allocArray<secp256k1_pubkey>(shares.size)
+            shares.forEachIndexed { i, share ->
+                secp256k1_ec_pubkey_parse(ctx, nShares[i].ptr, toNat(share), share.size.convert()).requireSuccess("secp256k1_ec_pubkey_parse() failed")
+            }
+            nShares
+        }
+
+    override fun frostTrustedDealerKeygen(thresholdSeckey32: ByteArray, nParticipants: Int, threshold: Int): Triple<ByteArray, Array<ByteArray>, Array<ByteArray>> {
+        require(thresholdSeckey32.size == 32)
+        require(nParticipants in 1..Secp256k1.FROST_MAX_PARTICIPANTS)
+        require(threshold in 1..nParticipants)
+        memScoped {
+            val nSecshares = allocArray<UByteVar>(32 * nParticipants)
+            val nThreshPk = alloc<secp256k1_pubkey>()
+            val nPubshares = allocArray<secp256k1_pubkey>(nParticipants)
+            secp256k1_frost_trusted_dealer_keygen(ctx, nSecshares, nThreshPk.ptr, nPubshares, nParticipants.convert(), threshold.toUInt(), toNat(thresholdSeckey32)).requireSuccess("secp256k1_frost_trusted_dealer_keygen() failed")
+            val secshares = nSecshares.readBytes(32 * nParticipants).toList().chunked(32) { it.toByteArray() }.toTypedArray()
+            val pubshares = (0 until nParticipants).map { serializePubkey(nPubshares[it]) }.toTypedArray()
+            return Triple(serializePubkey(nThreshPk), secshares, pubshares)
+        }
+    }
+
+    override fun frostThresholdInfoValidate(thresholdPubkey: ByteArray, pubshares: Array<ByteArray>, threshold: Int): Boolean {
+        require(pubshares.isNotEmpty())
+        pubshares.forEach { require(it.size == 33 || it.size == 65) }
+        require(threshold in 1..pubshares.size)
+        memScoped {
+            val nThreshPk = allocPublicKey(thresholdPubkey)
+            val nPubshares = allocPubshares(pubshares)
+            return secp256k1_frost_threshold_info_validate(ctx, nThreshPk.ptr, nPubshares, pubshares.size.convert(), threshold.toUInt()) == 1
+        }
+    }
+
+    override fun frostTweakCacheInit(thresholdPubkey: ByteArray): ByteArray {
+        require(thresholdPubkey.size == 33 || thresholdPubkey.size == 65)
+        memScoped {
+            val nThreshPk = allocPublicKey(thresholdPubkey)
+            val nCache = alloc<secp256k1_frost_tweak_cache>()
+            secp256k1_frost_tweak_cache_init(ctx, nCache.ptr, nThreshPk.ptr).requireSuccess("secp256k1_frost_tweak_cache_init() failed")
+            return nCache.ptr.readBytes(Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        }
+    }
+
+    override fun frostTweakedPubkeyGet(tweakCache: ByteArray): ByteArray {
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        memScoped {
+            val nCache = allocFrostTweakCache(tweakCache)
+            val nTweakedPk = alloc<secp256k1_xonly_pubkey>()
+            secp256k1_frost_tweaked_pubkey_get(ctx, nTweakedPk.ptr, nCache.ptr).requireSuccess("secp256k1_frost_tweaked_pubkey_get() failed")
+            return serializeXonlyPubkey(nTweakedPk)
+        }
+    }
+
+    private fun frostPubkeyTweakAdd(tweakCache: ByteArray, tweak32: ByteArray, xonly: Boolean): ByteArray {
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        require(tweak32.size == 32)
+        memScoped {
+            val nCache = allocFrostTweakCache(tweakCache)
+            val nTweakedPk = alloc<secp256k1_xonly_pubkey>()
+            val result = if (xonly) {
+                secp256k1_frost_pubkey_xonly_tweak_add(ctx, nTweakedPk.ptr, nCache.ptr, toNat(tweak32))
+            } else {
+                secp256k1_frost_pubkey_ec_tweak_add(ctx, nTweakedPk.ptr, nCache.ptr, toNat(tweak32))
+            }
+            result.requireSuccess("secp256k1_frost_pubkey_tweak_add() failed")
+            memcpy(toNat(tweakCache), nCache.ptr, Secp256k1.FROST_TWEAK_CACHE_SIZE.toULong())
+            return serializeXonlyPubkey(nTweakedPk)
+        }
+    }
+
+    override fun frostPubkeyXonlyTweakAdd(tweakCache: ByteArray, tweak32: ByteArray): ByteArray = frostPubkeyTweakAdd(tweakCache, tweak32, xonly = true)
+
+    override fun frostPubkeyEcTweakAdd(tweakCache: ByteArray, tweak32: ByteArray): ByteArray = frostPubkeyTweakAdd(tweakCache, tweak32, xonly = false)
+
+    override fun frostNonceGen(sessionRandom32: ByteArray, secshare32: ByteArray?, pubshare: ByteArray?, thresholdPubkey32: ByteArray?, msg: ByteArray?, extraInput: ByteArray?): ByteArray {
+        require(sessionRandom32.size == 32)
+        secshare32?.let { require(it.size == 32) }
+        thresholdPubkey32?.let { require(it.size == 32) }
+        memScoped {
+            val nSecnonce = alloc<secp256k1_frost_secnonce>()
+            val nPubnonce = alloc<secp256k1_frost_pubnonce>()
+            val nPubshare = pubshare?.let { allocPublicKey(it) }
+            // we make a native copy of sessionRandom32, which will be zeroed by secp256k1_frost_nonce_gen
+            val sessionRand32 = allocArray<UByteVar>(32)
+            memcpy(sessionRand32.pointed.ptr, toNat(sessionRandom32), 32u)
+            secp256k1_frost_nonce_gen(
+                ctx,
+                nSecnonce.ptr,
+                nPubnonce.ptr,
+                sessionRand32,
+                secshare32?.let { toNat(it) },
+                nPubshare?.ptr,
+                thresholdPubkey32?.let { toNat(it) },
+                msg?.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                msg?.size?.convert() ?: 0uL,
+                extraInput?.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                extraInput?.size?.convert() ?: 0uL
+            ).requireSuccess("secp256k1_frost_nonce_gen() failed")
+            val nPubnonceSerialized = allocArray<UByteVar>(Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+            secp256k1_frost_pubnonce_serialize(ctx, nPubnonceSerialized, nPubnonce.ptr).requireSuccess("secp256k1_frost_pubnonce_serialize failed")
+            return nSecnonce.ptr.readBytes(Secp256k1.FROST_SECRET_NONCE_SIZE) + nPubnonceSerialized.readBytes(Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+        }
+    }
+
+    override fun frostNonceAgg(pubnonces: Array<ByteArray>): ByteArray {
+        require(pubnonces.isNotEmpty())
+        pubnonces.forEach { require(it.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) }
+        memScoped {
+            val nPubnonces = pubnonces.map { allocFrostPubnonce(it).ptr }
+            val nErrorIndex = alloc<size_tVar>()
+            val combined = alloc<secp256k1_frost_aggnonce>()
+            secp256k1_frost_nonce_agg(ctx, combined.ptr, nErrorIndex.ptr, nPubnonces.toCValues(), pubnonces.size.convert()).requireSuccess("secp256k1_frost_nonce_agg() failed")
+            val serialized = allocArray<UByteVar>(Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+            secp256k1_frost_aggnonce_serialize(ctx, serialized, combined.ptr).requireSuccess("secp256k1_frost_aggnonce_serialize() failed")
+            return serialized.readBytes(Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+        }
+    }
+
+    override fun frostSessionInit(aggnonce: ByteArray, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray): ByteArray {
+        require(aggnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+        require(ids.isNotEmpty())
+        require(ids.all { it < nParticipants.toUInt() })
+        require(ids.toSet().size == ids.size) { "signer ids must be unique" }
+        pubshares?.let { require(it.size == ids.size) }
+        require(nParticipants in 1..Secp256k1.FROST_MAX_PARTICIPANTS)
+        require(threshold in 1..nParticipants)
+        require(ids.size in threshold..nParticipants)
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        memScoped {
+            val nAggnonce = alloc<secp256k1_frost_aggnonce>()
+            secp256k1_frost_aggnonce_parse(ctx, nAggnonce.ptr, toNat(aggnonce)).requireSuccess("secp256k1_frost_aggnonce_parse() failed")
+            val nPubshares = allocPubshares(pubshares)
+            val nCache = allocFrostTweakCache(tweakCache)
+            val nSession = alloc<secp256k1_frost_session>()
+            secp256k1_frost_session_init(
+                ctx,
+                nSession.ptr,
+                nAggnonce.ptr,
+                ids.toCValues(),
+                nPubshares,
+                ids.size.convert(),
+                nParticipants.convert(),
+                threshold.toUInt(),
+                nCache.ptr,
+                msg.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                msg.size.convert()
+            ).requireSuccess("secp256k1_frost_session_init() failed")
+            return nSession.ptr.readBytes(Secp256k1.FROST_SESSION_SIZE)
+        }
+    }
+
+    override fun frostSign(secnonce: ByteArray, secshare32: ByteArray, session: ByteArray, ids: UIntArray, pubshares: Array<ByteArray>?, myId: UInt): ByteArray {
+        require(secnonce.size == Secp256k1.FROST_SECRET_NONCE_SIZE)
+        require(secshare32.size == 32)
+        require(ids.isNotEmpty())
+        require(myId in ids) { "signer id must be one of the session's signer ids" }
+        pubshares?.let { require(it.size == ids.size) }
+        secnonce.checkMagic(Secp256k1.FROST_SECNONCE_MAGIC, "secret nonce")
+        memScoped {
+            val nSecnonce = alloc<secp256k1_frost_secnonce>()
+            memcpy(nSecnonce.ptr, toNat(secnonce), Secp256k1.FROST_SECRET_NONCE_SIZE.toULong())
+            val nSession = allocFrostSession(session)
+            val nPubshares = allocPubshares(pubshares)
+            val nPsig = alloc<secp256k1_frost_partial_sig>()
+            secp256k1_frost_sign(ctx, nPsig.ptr, nSecnonce.ptr, toNat(secshare32), nSession.ptr, ids.toCValues(), nPubshares, ids.size.convert(), myId).requireSuccess("secp256k1_frost_sign() failed")
+            val psig = ByteArray(32)
+            secp256k1_frost_partial_sig_serialize(ctx, toNat(psig), nPsig.ptr).requireSuccess("secp256k1_frost_partial_sig_serialize() failed")
+            return psig
+        }
+    }
+
+    override fun frostDeterministicSign(secshare32: ByteArray, myId: UInt, aggOtherNonce: ByteArray?, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray, auxRand32: ByteArray?): Pair<ByteArray, ByteArray> {
+        require(secshare32.size == 32)
+        require(ids.isNotEmpty())
+        require(myId in ids) { "signer id must be one of the session's signer ids" }
+        aggOtherNonce?.let { require(it.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) }
+        pubshares?.let { require(it.size == ids.size) }
+        require(nParticipants in 1..Secp256k1.FROST_MAX_PARTICIPANTS)
+        require(threshold in 1..nParticipants)
+        require(ids.size in threshold..nParticipants)
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        auxRand32?.let { require(it.size == 32) }
+        memScoped {
+            val nAggOtherNonce = aggOtherNonce?.let {
+                val n = alloc<secp256k1_frost_aggnonce>()
+                secp256k1_frost_aggnonce_parse(ctx, n.ptr, toNat(it)).requireSuccess("secp256k1_frost_aggnonce_parse() failed")
+                n
+            }
+            val nPubshares = allocPubshares(pubshares)
+            val nCache = allocFrostTweakCache(tweakCache)
+            val nPsig = alloc<secp256k1_frost_partial_sig>()
+            val nPubnonce = alloc<secp256k1_frost_pubnonce>()
+            secp256k1_frost_deterministic_sign(
+                ctx,
+                nPsig.ptr,
+                nPubnonce.ptr,
+                toNat(secshare32),
+                myId,
+                nAggOtherNonce?.ptr,
+                ids.toCValues(),
+                nPubshares,
+                ids.size.convert(),
+                nParticipants.convert(),
+                threshold.toUInt(),
+                nCache.ptr,
+                msg.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                msg.size.convert(),
+                auxRand32?.let { toNat(it) }
+            ).requireSuccess("secp256k1_frost_deterministic_sign() failed")
+            val psig = ByteArray(32)
+            secp256k1_frost_partial_sig_serialize(ctx, toNat(psig), nPsig.ptr).requireSuccess("secp256k1_frost_partial_sig_serialize() failed")
+            val pubnonce = allocArray<UByteVar>(Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+            secp256k1_frost_pubnonce_serialize(ctx, pubnonce, nPubnonce.ptr).requireSuccess("secp256k1_frost_pubnonce_serialize() failed")
+            return Pair(psig, pubnonce.readBytes(Secp256k1.FROST_PUBLIC_NONCE_SIZE))
+        }
+    }
+
+    override fun frostPartialSigVerify(psig: ByteArray, pubnonce: ByteArray, pubshare: ByteArray, session: ByteArray, ids: UIntArray, signerIndex: Int): Int {
+        require(psig.size == 32)
+        require(pubnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+        require(pubshare.size == 33 || pubshare.size == 65)
+        require(ids.isNotEmpty())
+        require(signerIndex in ids.indices)
+        memScoped {
+            val nPsig = allocFrostPartialSig(psig)
+            val nPubnonce = allocFrostPubnonce(pubnonce)
+            val nPubshare = allocPublicKey(pubshare)
+            val nSession = allocFrostSession(session)
+            return secp256k1_frost_partial_sig_verify(ctx, nPsig.ptr, nPubnonce.ptr, nPubshare.ptr, nSession.ptr, ids.toCValues(), ids.size.convert(), signerIndex.convert())
+        }
+    }
+
+    override fun frostPartialSigAgg(session: ByteArray, psigs: Array<ByteArray>): ByteArray {
+        require(psigs.isNotEmpty())
+        psigs.forEach { require(it.size == 32) }
+        memScoped {
+            val nSession = allocFrostSession(session)
+            val nPsigs = psigs.map { allocFrostPartialSig(it).ptr }
+            val nErrorIndex = alloc<size_tVar>()
+            val sig64 = ByteArray(64)
+            secp256k1_frost_partial_sig_agg(ctx, toNat(sig64), nErrorIndex.ptr, nSession.ptr, nPsigs.toCValues(), psigs.size.convert()).requireSuccess("secp256k1_frost_partial_sig_agg() failed")
+            return sig64
         }
     }
 }

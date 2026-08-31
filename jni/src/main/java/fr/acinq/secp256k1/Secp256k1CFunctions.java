@@ -49,6 +49,26 @@ public class Secp256k1CFunctions {
      */
     public static final int SECP256K1_MUSIG_SESSION_SIZE = 133;
 
+    /**
+     * A frost public nonce is simply two elliptic curve points.
+     */
+    public static final int SECP256K1_FROST_PUBLIC_NONCE_SIZE = 66;
+
+    /**
+     * A frost private nonce is basically two scalars, but should be treated as an opaque blob.
+     */
+    public static final int SECP256K1_FROST_SECRET_NONCE_SIZE = 68;
+
+    /**
+     * The frost tweak cache holds the threshold public key and the state of public key tweaking (must not be interpreted).
+     */
+    public static final int SECP256K1_FROST_TWEAK_CACHE_SIZE = 165;
+
+    /**
+     * When creating frost partial signatures and aggregating them, session data is kept in an opaque blob (must not be interpreted).
+     */
+    public static final int SECP256K1_FROST_SESSION_SIZE = 137;
+
     public static native long secp256k1_context_create(int flags);
 
     public static native void secp256k1_context_destroy(long ctx);
@@ -118,4 +138,34 @@ public class Secp256k1CFunctions {
     public static native byte[] secp256k1_musig_adapt(long ctx, byte[] pre_sig64, byte[] sec_adaptor32, int nonce_parity);
 
     public static native byte[] secp256k1_musig_extract_adaptor(long ctx, byte[] sig64, byte[] pre_sig64, int nonce_parity);
+
+    /* Returns the flattened key material: threshold public key (65 bytes), followed by the n 32-byte
+     * secret shares, followed by the n 65-byte public shares. */
+    public static native byte[] secp256k1_frost_trusted_dealer_keygen(long ctx, byte[] threshold_seckey32, int n_participants, int threshold);
+
+    public static native int secp256k1_frost_threshold_info_validate(long ctx, byte[] threshold_pk, byte[][] pubshares, int threshold);
+
+    public static native byte[] secp256k1_frost_tweak_cache_init(long ctx, byte[] threshold_pk);
+
+    public static native byte[] secp256k1_frost_tweaked_pubkey_get(long ctx, byte[] tweak_cache);
+
+    public static native byte[] secp256k1_frost_pubkey_xonly_tweak_add(long ctx, byte[] tweak_cache, byte[] tweak32);
+
+    public static native byte[] secp256k1_frost_pubkey_ec_tweak_add(long ctx, byte[] tweak_cache, byte[] tweak32);
+
+    /* Returns the flattened nonce: secret nonce (68 bytes) followed by the public nonce (66 bytes). */
+    public static native byte[] secp256k1_frost_nonce_gen(long ctx, byte[] session_secrand32, byte[] secshare32, byte[] pubshare, byte[] thresh_pk32, byte[] msg, byte[] extra_in);
+
+    public static native byte[] secp256k1_frost_nonce_agg(long ctx, byte[][] pubnonces);
+
+    public static native byte[] secp256k1_frost_session_init(long ctx, byte[] aggnonce, int[] ids, byte[][] pubshares, int n_participants, int threshold, byte[] tweak_cache, byte[] msg);
+
+    public static native byte[] secp256k1_frost_sign(long ctx, byte[] secnonce, byte[] secshare32, byte[] session, int[] ids, byte[][] pubshares, int my_id);
+
+    /* Returns the flattened result: partial signature (32 bytes) followed by the public nonce (66 bytes). */
+    public static native byte[] secp256k1_frost_deterministic_sign(long ctx, byte[] secshare32, int my_id, byte[] aggothernonce, int[] ids, byte[][] pubshares, int n_participants, int threshold, byte[] tweak_cache, byte[] msg, byte[] aux_rand32);
+
+    public static native int secp256k1_frost_partial_sig_verify(long ctx, byte[] psig, byte[] pubnonce, byte[] pubshare, byte[] session, int[] ids, int signer_index);
+
+    public static native byte[] secp256k1_frost_partial_sig_agg(long ctx, byte[] session, byte[][] psigs);
 }

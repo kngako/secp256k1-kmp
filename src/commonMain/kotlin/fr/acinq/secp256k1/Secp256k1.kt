@@ -330,6 +330,173 @@ public interface Secp256k1 {
      * @return 32-byte adaptor secret.
      */
     public fun musigExtractAdaptor(sig64: ByteArray, preSig64: ByteArray, nonceParity: Int): ByteArray
+
+    /**
+     * Generate FROST threshold key material with a trusted dealer (BIP 445).
+     * The dealer must transmit each secret share to its participant over a secure channel and erase all secret
+     * key material afterwards. Participants are identified by ids 0..[nParticipants]-1.
+     *
+     * WARNING: the underlying secp256k1 FROST module is experimental and must not be used in production.
+     *
+     * @param thresholdSeckey32 32-byte threshold secret key.
+     * @param nParticipants total number of participants n (at most [FROST_MAX_PARTICIPANTS]).
+     * @param threshold threshold t: the number of signers required to produce a signature.
+     * @return the threshold public key (65 bytes, uncompressed), the secret share of each participant (32 bytes
+     * each, entry i belongs to participant id i), and the public share of each participant (65 bytes each,
+     * uncompressed, entry i belongs to participant id i).
+     */
+    public fun frostTrustedDealerKeygen(thresholdSeckey32: ByteArray, nParticipants: Int, threshold: Int): Triple<ByteArray, Array<ByteArray>, Array<ByteArray>>
+
+    /**
+     * Validate FROST threshold key material (BIP 445 ValidateThresholdInfo): checks that the public shares lie on
+     * a single polynomial and that they are consistent with the threshold public key. This does NOT validate the
+     * security of the key generation that produced the key material.
+     *
+     * @param thresholdPubkey threshold public key (33 or 65 bytes).
+     * @param pubshares public shares of all participants (entry i belongs to participant id i).
+     * @param threshold threshold t.
+     * @return true if the key material is valid and consistent, false otherwise.
+     */
+    public fun frostThresholdInfoValidate(thresholdPubkey: ByteArray, pubshares: Array<ByteArray>, threshold: Int): Boolean
+
+    /**
+     * Initialize a FROST tweak cache from the threshold public key.
+     * A tweak cache is required to create signing sessions (see [frostSessionInit]), even if no tweaks are applied.
+     *
+     * @param thresholdPubkey the (untweaked) threshold public key (33 or 65 bytes).
+     * @return the tweak cache (opaque [FROST_TWEAK_CACHE_SIZE]-byte blob).
+     */
+    public fun frostTweakCacheInit(thresholdPubkey: ByteArray): ByteArray
+
+    /**
+     * Get the current (tweaked) threshold public key from a tweak cache. This is the BIP340 x-only public key
+     * that final signatures of sessions created with this cache verify against.
+     *
+     * @param tweakCache tweak cache (see [frostTweakCacheInit]).
+     * @return 32-byte x-only tweaked threshold public key.
+     */
+    public fun frostTweakedPubkeyGet(tweakCache: ByteArray): ByteArray
+
+    /**
+     * Apply an x-only tweak to a FROST tweak cache (BIP 341 "Taproot" tweaking: the current public key is
+     * negated if it has an odd y coordinate before the tweak is applied). The tweak cache is updated in place.
+     *
+     * @param tweakCache tweak cache (see [frostTweakCacheInit]).
+     * @param tweak32 32-byte tweak to apply.
+     * @return 32-byte x-only tweaked threshold public key.
+     */
+    public fun frostPubkeyXonlyTweakAdd(tweakCache: ByteArray, tweak32: ByteArray): ByteArray
+
+    /**
+     * Apply a plain tweak to a FROST tweak cache (BIP 32-style tweaking: the current public key is not negated
+     * before the tweak is applied). The tweak cache is updated in place.
+     *
+     * @param tweakCache tweak cache (see [frostTweakCacheInit]).
+     * @param tweak32 32-byte tweak to apply.
+     * @return 32-byte x-only tweaked threshold public key.
+     */
+    public fun frostPubkeyEcTweakAdd(tweakCache: ByteArray, tweak32: ByteArray): ByteArray
+
+    /**
+     * Generate a secret nonce to be used in a FROST signing session (BIP 445 NonceGen).
+     * This nonce must never be persisted or reused across signing sessions: reusing it leaks the secret share.
+     * All optional arguments exist to enrich the quality of the randomness used, which is critical for security.
+     *
+     * @param sessionRandom32 unique 32-byte random data that must not be reused to generate other nonces.
+     * @param secshare32 (optional) signer's 32-byte secret share (see [frostTrustedDealerKeygen]).
+     * @param pubshare (optional) signer's public share.
+     * @param thresholdPubkey32 (optional) 32-byte x-only encoding of the threshold public key the signature will
+     * verify against (i.e. after applying tweaks, if any, see [frostTweakedPubkeyGet]).
+     * @param msg (optional) message that will be signed, if already known.
+     * @param extraInput (optional) additional data to bind into the nonce derivation.
+     * @return serialized version of the secret nonce and the corresponding public nonce.
+     */
+    public fun frostNonceGen(sessionRandom32: ByteArray, secshare32: ByteArray?, pubshare: ByteArray?, thresholdPubkey32: ByteArray?, msg: ByteArray?, extraInput: ByteArray?): ByteArray
+
+    /**
+     * Aggregate the public nonces of all signers of a FROST signing session.
+     *
+     * @param pubnonces public nonces (one per signer). The pubnonce at index i must belong to the signer whose id
+     * is at index i in the ids array passed to [frostSessionInit].
+     * @return 66-byte aggregate public nonce.
+     */
+    public fun frostNonceAgg(pubnonces: Array<ByteArray>): ByteArray
+
+    /**
+     * Create a FROST signing session context based on the public information from all participants.
+     * All signers and the coordinator must use identical parameters. The session is signer-agnostic: the same
+     * session can be used by the coordinator to verify the partial signatures of all signers.
+     *
+     * @param aggnonce aggregated public nonce (see [frostNonceAgg]).
+     * @param ids identifiers of the u signers. Every id must be unique and smaller than [nParticipants].
+     * @param pubshares (optional) public shares of the signers (entry i belongs to ids[i]). If provided, they are
+     * validated against the threshold public key.
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t.
+     * @param tweakCache tweak cache holding the threshold public key and all tweaks applied to it.
+     * @param msg message that will be signed.
+     * @return signing session context (opaque [FROST_SESSION_SIZE]-byte blob).
+     */
+    public fun frostSessionInit(aggnonce: ByteArray, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray): ByteArray
+
+    /**
+     * Create a FROST partial signature (BIP 445 Sign).
+     *
+     * @param secnonce signer's secret nonce (see [frostNonceGen]). It must not be reused afterwards.
+     * @param secshare32 signer's 32-byte secret share.
+     * @param session signing session context (see [frostSessionInit]).
+     * @param ids identifiers of the u signers (identical to [frostSessionInit]).
+     * @param pubshares (optional) public shares of the signers (identical to [frostSessionInit]). If provided, the
+     * secret share is checked against the signer's public share (recommended).
+     * @param myId signer's identifier (must be one of [ids]).
+     * @return 32-byte partial signature.
+     */
+    public fun frostSign(secnonce: ByteArray, secshare32: ByteArray, session: ByteArray, ids: UIntArray, pubshares: Array<ByteArray>?, myId: UInt): ByteArray
+
+    /**
+     * Create a FROST partial signature with a deterministically derived nonce (BIP 445 DeterministicSign), for a
+     * signer that is online throughout the whole session. The nonce is derived from the secret share, the signer
+     * set, the other signers' aggregate nonce, the tweaked threshold public key, and the message.
+     *
+     * @param secshare32 signer's 32-byte secret share.
+     * @param myId signer's identifier.
+     * @param aggOtherNonce aggregate of all _other_ signers' public nonces (see [frostNonceAgg]), or null for a
+     * sole signer.
+     * @param ids identifiers of the u signers.
+     * @param pubshares (optional) public shares of the signers.
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t.
+     * @param tweakCache tweak cache holding the threshold public key and all tweaks applied to it.
+     * @param msg message that will be signed.
+     * @param auxRand32 (optional) 32 bytes of auxiliary randomness mixed into the nonce derivation.
+     * @return the signer's 32-byte partial signature and 66-byte public nonce (to be sent to the coordinator).
+     */
+    public fun frostDeterministicSign(secshare32: ByteArray, myId: UInt, aggOtherNonce: ByteArray?, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray, auxRand32: ByteArray?): Pair<ByteArray, ByteArray>
+
+    /**
+     * Verify the partial signature from one of the FROST signing session's signers.
+     *
+     * @param psig 32-byte partial signature.
+     * @param pubnonce public nonce of the signing participant.
+     * @param pubshare public share of the signing participant.
+     * @param session signing session context (see [frostSessionInit]).
+     * @param ids identifiers of the u signers (identical to [frostSessionInit]).
+     * @param signerIndex index of the signer in the [ids] array.
+     * @return result code (1 if the partial signature is valid, 0 otherwise).
+     */
+    public fun frostPartialSigVerify(psig: ByteArray, pubnonce: ByteArray, pubshare: ByteArray, session: ByteArray, ids: UIntArray, signerIndex: Int): Int
+
+    /**
+     * Aggregate partial signatures from all signers into a single BIP340 schnorr signature. If some of the
+     * partial signatures are invalid, this function will return an invalid aggregated signature without raising
+     * an error. It is recommended to use [frostPartialSigVerify] to verify partial signatures first.
+     *
+     * @param session signing session context (see [frostSessionInit]).
+     * @param psigs list of 32-byte partial signatures. The partial signature at index i must belong to the signer
+     * whose id is at index i in the ids array passed to [frostSessionInit].
+     * @return 64-byte aggregated schnorr signature.
+     */
+    public fun frostPartialSigAgg(session: ByteArray, psigs: Array<ByteArray>): ByteArray
     
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
@@ -340,6 +507,12 @@ public interface Secp256k1 {
         public const val MUSIG2_PUBLIC_NONCE_SIZE: Int = 66
         public const val MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE: Int = 197
         public const val MUSIG2_PUBLIC_SESSION_SIZE: Int = 133
+
+        public const val FROST_SECRET_NONCE_SIZE: Int = 68
+        public const val FROST_PUBLIC_NONCE_SIZE: Int = 66
+        public const val FROST_TWEAK_CACHE_SIZE: Int = 165
+        public const val FROST_SESSION_SIZE: Int = 137
+        public const val FROST_MAX_PARTICIPANTS: Int = 128
         /*
          * libsecp256k1 tags each of its opaque musig2 objects with a 4-byte magic prefix and validates it
          * internally with ARG_CHECK, which invokes the context's illegal-argument callback. The default
@@ -352,6 +525,14 @@ public interface Secp256k1 {
         internal val MUSIG_KEYAGG_CACHE_MAGIC = byteArrayOf(0xf4.toByte(), 0xad.toByte(), 0xbb.toByte(), 0xdf.toByte())
         internal val MUSIG_SESSION_MAGIC = byteArrayOf(0x9d.toByte(), 0xed.toByte(), 0xe9.toByte(), 0x17)
         internal val MUSIG2_SECNONCE_MAGIC = byteArrayOf(0x22.toByte(), 0x0e.toByte(), 0xdc.toByte(), 0xf1.toByte())
+        /*
+         * Same thing for the opaque FROST objects that are passed back to libsecp256k1 as raw byte arrays.
+         *
+         * Keep in sync with native/secp256k1/src/modules/frost/{keygen,session}_impl.h.
+         */
+        internal val FROST_SECNONCE_MAGIC = byteArrayOf(0x5c.toByte(), 0xcf.toByte(), 0xb9.toByte(), 0x99.toByte())
+        internal val FROST_TWEAK_CACHE_MAGIC = byteArrayOf(0x8d.toByte(), 0x86.toByte(), 0xb5.toByte(), 0x01.toByte())
+        internal val FROST_SESSION_MAGIC = byteArrayOf(0x34.toByte(), 0xb5.toByte(), 0x27.toByte(), 0x3d.toByte())
         // @formatter:on
     }
 }

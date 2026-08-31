@@ -229,4 +229,116 @@ public object Secp256k1Jni : Secp256k1 {
         require(nonceParity in 0..1) { "nonce parity must be 0 or 1" }
         return Secp256k1CFunctions.secp256k1_musig_extract_adaptor(Secp256k1Context.getContext(), sig64, preSig64, nonceParity)
     }
+
+    override fun frostTrustedDealerKeygen(thresholdSeckey32: ByteArray, nParticipants: Int, threshold: Int): Triple<ByteArray, Array<ByteArray>, Array<ByteArray>> {
+        require(thresholdSeckey32.size == 32) { "threshold secret key must be 32 bytes" }
+        require(nParticipants in 1..Secp256k1.FROST_MAX_PARTICIPANTS) { "invalid number of participants" }
+        require(threshold in 1..nParticipants) { "invalid threshold" }
+        val result = Secp256k1CFunctions.secp256k1_frost_trusted_dealer_keygen(Secp256k1Context.getContext(), thresholdSeckey32, nParticipants, threshold)
+        val thresholdPubkey = result.copyOfRange(0, 65)
+        val secshares = (0 until nParticipants).map { result.copyOfRange(65 + 32 * it, 65 + 32 * (it + 1)) }.toTypedArray()
+        val pubshares = (0 until nParticipants).map { result.copyOfRange(65 + 32 * nParticipants + 65 * it, 65 + 32 * nParticipants + 65 * (it + 1)) }.toTypedArray()
+        return Triple(thresholdPubkey, secshares, pubshares)
+    }
+
+    override fun frostThresholdInfoValidate(thresholdPubkey: ByteArray, pubshares: Array<ByteArray>, threshold: Int): Boolean {
+        require(pubshares.isNotEmpty()) { "public shares must not be empty" }
+        pubshares.forEach { require(it.size == 33 || it.size == 65) { "public share must be 33 or 65 bytes" } }
+        require(threshold in 1..pubshares.size) { "invalid threshold" }
+        return Secp256k1CFunctions.secp256k1_frost_threshold_info_validate(Secp256k1Context.getContext(), thresholdPubkey, pubshares, threshold) == 1
+    }
+
+    override fun frostTweakCacheInit(thresholdPubkey: ByteArray): ByteArray {
+        require(thresholdPubkey.size == 33 || thresholdPubkey.size == 65) { "threshold public key must be 33 or 65 bytes" }
+        return Secp256k1CFunctions.secp256k1_frost_tweak_cache_init(Secp256k1Context.getContext(), thresholdPubkey)
+    }
+
+    override fun frostTweakedPubkeyGet(tweakCache: ByteArray): ByteArray {
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        return Secp256k1CFunctions.secp256k1_frost_tweaked_pubkey_get(Secp256k1Context.getContext(), tweakCache)
+    }
+
+    override fun frostPubkeyXonlyTweakAdd(tweakCache: ByteArray, tweak32: ByteArray): ByteArray {
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        require(tweak32.size == 32) { "tweak must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_frost_pubkey_xonly_tweak_add(Secp256k1Context.getContext(), tweakCache, tweak32)
+    }
+
+    override fun frostPubkeyEcTweakAdd(tweakCache: ByteArray, tweak32: ByteArray): ByteArray {
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        require(tweak32.size == 32) { "tweak must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_frost_pubkey_ec_tweak_add(Secp256k1Context.getContext(), tweakCache, tweak32)
+    }
+
+    override fun frostNonceGen(sessionRandom32: ByteArray, secshare32: ByteArray?, pubshare: ByteArray?, thresholdPubkey32: ByteArray?, msg: ByteArray?, extraInput: ByteArray?): ByteArray {
+        require(sessionRandom32.size == 32) { "session random must be 32 bytes" }
+        secshare32?.let { require(it.size == 32) { "secret share must be 32 bytes" } }
+        pubshare?.let { require(it.size == 33 || it.size == 65) { "public share must be 33 or 65 bytes" } }
+        thresholdPubkey32?.let { require(it.size == 32) { "threshold public key must be 32 bytes" } }
+        return Secp256k1CFunctions.secp256k1_frost_nonce_gen(Secp256k1Context.getContext(), sessionRandom32, secshare32, pubshare, thresholdPubkey32, msg, extraInput)
+    }
+
+    override fun frostNonceAgg(pubnonces: Array<ByteArray>): ByteArray {
+        require(pubnonces.isNotEmpty()) { "pubnonces must not be empty" }
+        pubnonces.forEach { require(it.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" } }
+        return Secp256k1CFunctions.secp256k1_frost_nonce_agg(Secp256k1Context.getContext(), pubnonces)
+    }
+
+    override fun frostSessionInit(aggnonce: ByteArray, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray): ByteArray {
+        require(aggnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "aggregate nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" }
+        require(ids.isNotEmpty()) { "signer ids must not be empty" }
+        require(ids.toSet().size == ids.size) { "signer ids must be unique" }
+        pubshares?.let {
+            require(it.size == ids.size) { "public shares count must match signer ids count" }
+            it.forEach { share -> require(share.size == 33 || share.size == 65) { "public share must be 33 or 65 bytes" } }
+        }
+        require(nParticipants in 1..Secp256k1.FROST_MAX_PARTICIPANTS) { "invalid number of participants" }
+        require(ids.all { it < nParticipants.toUInt() }) { "signer ids must be smaller than the number of participants" }
+        require(threshold in 1..nParticipants) { "invalid threshold" }
+        require(ids.size in threshold..nParticipants) { "invalid number of signers" }
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        return Secp256k1CFunctions.secp256k1_frost_session_init(Secp256k1Context.getContext(), aggnonce, ids.map { it.toInt() }.toIntArray(), pubshares, nParticipants, threshold, tweakCache, msg)
+    }
+
+    override fun frostSign(secnonce: ByteArray, secshare32: ByteArray, session: ByteArray, ids: UIntArray, pubshares: Array<ByteArray>?, myId: UInt): ByteArray {
+        require(secnonce.size == Secp256k1.FROST_SECRET_NONCE_SIZE) { "secret nonce must be ${Secp256k1.FROST_SECRET_NONCE_SIZE} bytes" }
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        require(session.size == Secp256k1.FROST_SESSION_SIZE) { "invalid session size" }
+        require(ids.isNotEmpty()) { "signer ids must not be empty" }
+        require(myId in ids) { "signer id must be one of the session's signer ids" }
+        pubshares?.let { require(it.size == ids.size) { "public shares count must match signer ids count" } }
+        return Secp256k1CFunctions.secp256k1_frost_sign(Secp256k1Context.getContext(), secnonce, secshare32, session, ids.map { it.toInt() }.toIntArray(), pubshares, myId.toInt())
+    }
+
+    override fun frostDeterministicSign(secshare32: ByteArray, myId: UInt, aggOtherNonce: ByteArray?, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray, auxRand32: ByteArray?): Pair<ByteArray, ByteArray> {
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        require(ids.isNotEmpty()) { "signer ids must not be empty" }
+        require(myId in ids) { "signer id must be one of the session's signer ids" }
+        aggOtherNonce?.let { require(it.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "aggregate nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" } }
+        pubshares?.let { require(it.size == ids.size) { "public shares count must match signer ids count" } }
+        require(nParticipants in 1..Secp256k1.FROST_MAX_PARTICIPANTS) { "invalid number of participants" }
+        require(threshold in 1..nParticipants) { "invalid threshold" }
+        require(ids.size in threshold..nParticipants) { "invalid number of signers" }
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        auxRand32?.let { require(it.size == 32) { "auxiliary random data must be 32 bytes" } }
+        val result = Secp256k1CFunctions.secp256k1_frost_deterministic_sign(Secp256k1Context.getContext(), secshare32, myId.toInt(), aggOtherNonce, ids.map { it.toInt() }.toIntArray(), pubshares, nParticipants, threshold, tweakCache, msg, auxRand32)
+        return Pair(result.copyOfRange(0, 32), result.copyOfRange(32, 32 + Secp256k1.FROST_PUBLIC_NONCE_SIZE))
+    }
+
+    override fun frostPartialSigVerify(psig: ByteArray, pubnonce: ByteArray, pubshare: ByteArray, session: ByteArray, ids: UIntArray, signerIndex: Int): Int {
+        require(psig.size == 32) { "partial signature must be 32 bytes" }
+        require(pubnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" }
+        require(pubshare.size == 33 || pubshare.size == 65) { "public share must be 33 or 65 bytes" }
+        require(session.size == Secp256k1.FROST_SESSION_SIZE) { "invalid session size" }
+        require(ids.isNotEmpty()) { "signer ids must not be empty" }
+        require(signerIndex in ids.indices) { "invalid signer index" }
+        return Secp256k1CFunctions.secp256k1_frost_partial_sig_verify(Secp256k1Context.getContext(), psig, pubnonce, pubshare, session, ids.map { it.toInt() }.toIntArray(), signerIndex)
+    }
+
+    override fun frostPartialSigAgg(session: ByteArray, psigs: Array<ByteArray>): ByteArray {
+        require(session.size == Secp256k1.FROST_SESSION_SIZE) { "invalid session size" }
+        require(psigs.isNotEmpty()) { "partial signatures must not be empty" }
+        psigs.forEach { require(it.size == 32) { "partial signature must be 32 bytes" } }
+        return Secp256k1CFunctions.secp256k1_frost_partial_sig_agg(Secp256k1Context.getContext(), session, psigs)
+    }
 }
