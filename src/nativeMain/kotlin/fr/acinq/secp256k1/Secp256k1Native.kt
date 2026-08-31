@@ -451,7 +451,7 @@ public object Secp256k1Native : Secp256k1 {
             val nSession = alloc<secp256k1_musig_session>()
             val nAggnonce = alloc<secp256k1_musig_aggnonce>()
             secp256k1_musig_aggnonce_parse(ctx, nAggnonce.ptr, toNat(aggnonce)).requireSuccess("secp256k1_musig_aggnonce_parse() failed")
-            secp256k1_musig_nonce_process(ctx, nSession.ptr, nAggnonce.ptr, toNat(msg32), nKeyAggCache.ptr).requireSuccess("secp256k1_musig_nonce_process() failed")
+            secp256k1_musig_nonce_process(ctx, nSession.ptr, nAggnonce.ptr, toNat(msg32), nKeyAggCache.ptr, null).requireSuccess("secp256k1_musig_nonce_process() failed")
             val session = ByteArray(Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE)
             memcpy(toNat(session), nSession.ptr, Secp256k1.MUSIG2_PUBLIC_SESSION_SIZE.toULong())
             return session

@@ -978,7 +978,7 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     if (!get_bytes(penv, jkeyaggcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_KEYAGG_CACHE_SIZE, keyaggcache.data, "keyagg cache")) return NULL;
     CHECKMAGIC(keyaggcache.data, MUSIG_KEYAGG_CACHE_MAGIC, "invalid keyagg cache");
 
-    result = secp256k1_musig_nonce_process(ctx, &session, &aggnonce, msg32, &keyaggcache);
+    result = secp256k1_musig_nonce_process(ctx, &session, &aggnonce, msg32, &keyaggcache, NULL);
     CHECKRESULT(!result, "secp256k1_musig_nonce_process failed");
 
     return copy_bytes_to_java(penv, session.data, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_SESSION_SIZE);
