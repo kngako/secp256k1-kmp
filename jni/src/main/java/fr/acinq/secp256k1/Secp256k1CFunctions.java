@@ -89,6 +89,31 @@ public class Secp256k1CFunctions {
      */
     public static final int SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE = 21041;
 
+    /**
+     * Largest size of a serialized iceberg share.
+     */
+    public static final int SECP256K1_ICEBERG_SHARE_MAX_SIZE = 4036;
+
+    /**
+     * Size of the opaque iceberg share cache blob (has no serialized form).
+     */
+    public static final int SECP256K1_ICEBERG_SHARE_CACHE_SIZE = 4040;
+
+    /**
+     * Size of a serialized iceberg public key share.
+     */
+    public static final int SECP256K1_ICEBERG_PUBLIC_SHARE_SIZE = 34;
+
+    /**
+     * Size of a serialized iceberg nonce contribution.
+     */
+    public static final int SECP256K1_ICEBERG_PUBLIC_NONCE_SIZE = 67;
+
+    /**
+     * Size of a serialized iceberg signature share.
+     */
+    public static final int SECP256K1_ICEBERG_PARTIAL_SIG_SIZE = 33;
+
     public static native long secp256k1_context_create(int flags);
 
     public static native void secp256k1_context_destroy(long ctx);
@@ -218,4 +243,25 @@ public class Secp256k1CFunctions {
     public static native int secp256k1_chilldkg_coordinator_investigate(long ctx, byte[][] pmsgs1, byte[][] hostpubkeys33, int threshold, int participantId, byte[] cinvOut, int[] faultIndexOut);
 
     public static native int secp256k1_chilldkg_participant_investigate(long ctx, byte[] invData, byte[] cinv, int[] faultIndexOut);
+
+    /* Returns the n serialized shares concatenated (all shares of a group serialize to the same length). */
+    public static native byte[] secp256k1_iceberg_shares_gen(long ctx, int n, int t, byte[] seed32);
+
+    public static native byte[] secp256k1_iceberg_share_cache_create(long ctx, byte[] share);
+
+    public static native byte[] secp256k1_iceberg_pubshare_gen(long ctx, byte[] share, byte[] cache);
+
+    public static native byte[] secp256k1_iceberg_pubkey_agg(long ctx, byte[][] pubshares, int n, int t);
+
+    public static native byte[] secp256k1_iceberg_nonce_gen(long ctx, byte[] share, byte[] cache, byte[] sid32);
+
+    public static native byte[] secp256k1_iceberg_nonce_agg(long ctx, byte[][] pubnonces, int n, int t, byte[] grouppk);
+
+    public static native int secp256k1_iceberg_keyagg_check(long ctx, byte[] keyaggcache, byte[][] pubkeys, byte[] grouppk);
+
+    public static native byte[] secp256k1_iceberg_partial_sign(long ctx, byte[] share, byte[] cache, byte[] sid32, byte[][] pubnonces, byte[] grouppk, byte[] keyaggcache, byte[] msg32, byte[] cosigner_aggnonce);
+
+    public static native int secp256k1_iceberg_partial_sig_verify(long ctx, byte[] psig, byte[] pubshare, byte[][] pubnonces, int n, int t, byte[] grouppk, byte[] keyaggcache, byte[] msg32, byte[] cosigner_aggnonce);
+
+    public static native byte[] secp256k1_iceberg_partial_sig_agg(long ctx, byte[][] psigs, int n, int t);
 }

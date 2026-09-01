@@ -486,4 +486,83 @@ public object Secp256k1Jni : Secp256k1 {
         val fault = Secp256k1CFunctions.secp256k1_chilldkg_participant_investigate(Secp256k1Context.getContext(), investigationData, cinv, faultIndex)
         return chilldkgFault(fault, faultIndex)
     }
+
+    override fun icebergSharesGen(n: Int, t: Int, seed32: ByteArray): Array<ByteArray> {
+        require(n in 1..Secp256k1.ICEBERG_MAX_PARTICIPANTS) { "invalid number of participants" }
+        require(t in 1..(n + 1) / 2) { "invalid threshold" }
+        require(seed32.size == 32) { "seed must be 32 bytes" }
+        val flat = Secp256k1CFunctions.secp256k1_iceberg_shares_gen(Secp256k1Context.getContext(), n, t, seed32)
+        val shareLen = flat.size / n
+        return (0 until n).map { flat.copyOfRange(shareLen * it, shareLen * (it + 1)) }.toTypedArray()
+    }
+
+    override fun icebergShareCacheCreate(share: ByteArray): ByteArray {
+        require(share.isNotEmpty()) { "share must not be empty" }
+        return Secp256k1CFunctions.secp256k1_iceberg_share_cache_create(Secp256k1Context.getContext(), share)
+    }
+
+    override fun icebergPubshareGen(share: ByteArray, cache: ByteArray?): ByteArray {
+        require(share.isNotEmpty()) { "share must not be empty" }
+        cache?.let { require(it.size == Secp256k1.ICEBERG_SHARE_CACHE_SIZE) { "invalid share cache size" } }
+        return Secp256k1CFunctions.secp256k1_iceberg_pubshare_gen(Secp256k1Context.getContext(), share, cache)
+    }
+
+    override fun icebergPubkeyAgg(pubshares: Array<ByteArray>, n: Int, t: Int): ByteArray {
+        require(pubshares.isNotEmpty()) { "public shares must not be empty" }
+        pubshares.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE) { "public share must be ${Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE} bytes" } }
+        return Secp256k1CFunctions.secp256k1_iceberg_pubkey_agg(Secp256k1Context.getContext(), pubshares, n, t)
+    }
+
+    override fun icebergNonceGen(share: ByteArray, cache: ByteArray?, sid32: ByteArray): ByteArray {
+        require(share.isNotEmpty()) { "share must not be empty" }
+        cache?.let { require(it.size == Secp256k1.ICEBERG_SHARE_CACHE_SIZE) { "invalid share cache size" } }
+        require(sid32.size == 32) { "session label must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_iceberg_nonce_gen(Secp256k1Context.getContext(), share, cache, sid32)
+    }
+
+    override fun icebergNonceAgg(pubnonces: Array<ByteArray>, n: Int, t: Int, groupPubkey: ByteArray): ByteArray {
+        require(pubnonces.isNotEmpty()) { "public nonces must not be empty" }
+        pubnonces.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE} bytes" } }
+        require(groupPubkey.size == 33 || groupPubkey.size == 65) { "group public key must be 33 or 65 bytes" }
+        return Secp256k1CFunctions.secp256k1_iceberg_nonce_agg(Secp256k1Context.getContext(), pubnonces, n, t, groupPubkey)
+    }
+
+    override fun icebergKeyaggCheck(keyaggCache: ByteArray, pubkeys: Array<ByteArray>, groupPubkey: ByteArray): Boolean {
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) { "invalid keyagg cache size" }
+        require(pubkeys.isNotEmpty()) { "public keys must not be empty" }
+        pubkeys.forEach { require(it.size == 33 || it.size == 65) { "public key must be 33 or 65 bytes" } }
+        require(groupPubkey.size == 33 || groupPubkey.size == 65) { "group public key must be 33 or 65 bytes" }
+        return Secp256k1CFunctions.secp256k1_iceberg_keyagg_check(Secp256k1Context.getContext(), keyaggCache, pubkeys, groupPubkey) == 1
+    }
+
+    override fun icebergPartialSign(share: ByteArray, cache: ByteArray?, sid32: ByteArray, pubnonces: Array<ByteArray>, groupPubkey: ByteArray, keyaggCache: ByteArray, msg32: ByteArray, cosignerAggnonce: ByteArray): ByteArray {
+        require(share.isNotEmpty()) { "share must not be empty" }
+        cache?.let { require(it.size == Secp256k1.ICEBERG_SHARE_CACHE_SIZE) { "invalid share cache size" } }
+        require(sid32.size == 32) { "session label must be 32 bytes" }
+        require(pubnonces.isNotEmpty()) { "public nonces must not be empty" }
+        pubnonces.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE} bytes" } }
+        require(groupPubkey.size == 33 || groupPubkey.size == 65) { "group public key must be 33 or 65 bytes" }
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) { "invalid keyagg cache size" }
+        require(msg32.size == 32) { "message must be 32 bytes" }
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE) { "cosigner aggregate nonce must be ${Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE} bytes" }
+        return Secp256k1CFunctions.secp256k1_iceberg_partial_sign(Secp256k1Context.getContext(), share, cache, sid32, pubnonces, groupPubkey, keyaggCache, msg32, cosignerAggnonce)
+    }
+
+    override fun icebergPartialSigVerify(psig: ByteArray, pubshare: ByteArray, pubnonces: Array<ByteArray>, n: Int, t: Int, groupPubkey: ByteArray, keyaggCache: ByteArray, msg32: ByteArray, cosignerAggnonce: ByteArray): Int {
+        require(psig.size == Secp256k1.ICEBERG_PARTIAL_SIG_SIZE) { "signature share must be ${Secp256k1.ICEBERG_PARTIAL_SIG_SIZE} bytes" }
+        require(pubshare.size == Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE) { "public share must be ${Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE} bytes" }
+        require(pubnonces.isNotEmpty()) { "public nonces must not be empty" }
+        pubnonces.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE} bytes" } }
+        require(groupPubkey.size == 33 || groupPubkey.size == 65) { "group public key must be 33 or 65 bytes" }
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) { "invalid keyagg cache size" }
+        require(msg32.size == 32) { "message must be 32 bytes" }
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE) { "cosigner aggregate nonce must be ${Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE} bytes" }
+        return Secp256k1CFunctions.secp256k1_iceberg_partial_sig_verify(Secp256k1Context.getContext(), psig, pubshare, pubnonces, n, t, groupPubkey, keyaggCache, msg32, cosignerAggnonce)
+    }
+
+    override fun icebergPartialSigAgg(psigs: Array<ByteArray>, n: Int, t: Int): ByteArray {
+        require(psigs.isNotEmpty()) { "signature shares must not be empty" }
+        psigs.forEach { require(it.size == Secp256k1.ICEBERG_PARTIAL_SIG_SIZE) { "signature share must be ${Secp256k1.ICEBERG_PARTIAL_SIG_SIZE} bytes" } }
+        return Secp256k1CFunctions.secp256k1_iceberg_partial_sig_agg(Secp256k1Context.getContext(), psigs, n, t)
+    }
 }

@@ -1071,6 +1071,195 @@ public object Secp256k1Native : Secp256k1 {
             return chilldkgFault(fault, nFaultIndex.value)
         }
     }
+
+    private fun MemScope.allocIcebergShare(share: ByteArray): secp256k1_iceberg_share {
+        val nShare = alloc<secp256k1_iceberg_share>()
+        secp256k1_iceberg_share_parse(ctx, nShare.ptr, toNat(share), share.size.convert()).requireSuccess("secp256k1_iceberg_share_parse() failed")
+        return nShare
+    }
+
+    private fun MemScope.allocIcebergCache(cache: ByteArray): secp256k1_iceberg_share_cache {
+        cache.checkMagic(Secp256k1.ICEBERG_SHARE_CACHE_MAGIC, "share cache")
+        val nCache = alloc<secp256k1_iceberg_share_cache>()
+        memcpy(nCache.ptr, toNat(cache), Secp256k1.ICEBERG_SHARE_CACHE_SIZE.toULong())
+        return nCache
+    }
+
+    private fun MemScope.allocIcebergPubshare(pubshare: ByteArray): secp256k1_iceberg_pubshare {
+        val nPubshare = alloc<secp256k1_iceberg_pubshare>()
+        secp256k1_iceberg_pubshare_parse(ctx, nPubshare.ptr, toNat(pubshare)).requireSuccess("secp256k1_iceberg_pubshare_parse() failed")
+        return nPubshare
+    }
+
+    private fun MemScope.allocIcebergPubnonce(pubnonce: ByteArray): secp256k1_iceberg_pubnonce {
+        val nPubnonce = alloc<secp256k1_iceberg_pubnonce>()
+        secp256k1_iceberg_pubnonce_parse(ctx, nPubnonce.ptr, toNat(pubnonce)).requireSuccess("secp256k1_iceberg_pubnonce_parse() failed")
+        return nPubnonce
+    }
+
+    private fun MemScope.allocIcebergPartialSig(psig: ByteArray): secp256k1_iceberg_partial_sig {
+        val nPsig = alloc<secp256k1_iceberg_partial_sig>()
+        secp256k1_iceberg_partial_sig_parse(ctx, nPsig.ptr, toNat(psig)).requireSuccess("secp256k1_iceberg_partial_sig_parse() failed")
+        return nPsig
+    }
+
+    private fun MemScope.allocMusigKeyaggCache(keyaggCache: ByteArray): secp256k1_musig_keyagg_cache {
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
+        memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
+        return nKeyAggCache
+    }
+
+    private fun MemScope.allocMusigAggnonce(aggnonce: ByteArray): secp256k1_musig_aggnonce {
+        val nAggnonce = alloc<secp256k1_musig_aggnonce>()
+        secp256k1_musig_aggnonce_parse(ctx, nAggnonce.ptr, toNat(aggnonce)).requireSuccess("secp256k1_musig_aggnonce_parse() failed")
+        return nAggnonce
+    }
+
+    override fun icebergSharesGen(n: Int, t: Int, seed32: ByteArray): Array<ByteArray> {
+        require(n in 1..Secp256k1.ICEBERG_MAX_PARTICIPANTS)
+        require(t in 1..(n + 1) / 2) { "invalid threshold" }
+        require(seed32.size == 32)
+        memScoped {
+            val nShares = allocArray<secp256k1_iceberg_share>(n)
+            val nSharePtrs = (0 until n).map { nShares[it].ptr }.toCValues()
+            secp256k1_iceberg_shares_gen(ctx, nSharePtrs, n.toUInt(), t.toUInt(), toNat(seed32)).requireSuccess("secp256k1_iceberg_shares_gen() failed")
+            return (0 until n).map { i ->
+                val out = allocArray<UByteVar>(Secp256k1.ICEBERG_SHARE_MAX_SIZE)
+                val outLen = alloc<size_tVar>()
+                outLen.value = Secp256k1.ICEBERG_SHARE_MAX_SIZE.convert()
+                secp256k1_iceberg_share_serialize(ctx, out, outLen.ptr, nShares[i].ptr).requireSuccess("secp256k1_iceberg_share_serialize() failed")
+                out.readBytes(outLen.value.toInt())
+            }.toTypedArray()
+        }
+    }
+
+    override fun icebergShareCacheCreate(share: ByteArray): ByteArray {
+        memScoped {
+            val nShare = allocIcebergShare(share)
+            val nCache = alloc<secp256k1_iceberg_share_cache>()
+            secp256k1_iceberg_share_cache_create(ctx, nCache.ptr, nShare.ptr).requireSuccess("secp256k1_iceberg_share_cache_create() failed")
+            return nCache.ptr.readBytes(Secp256k1.ICEBERG_SHARE_CACHE_SIZE)
+        }
+    }
+
+    override fun icebergPubshareGen(share: ByteArray, cache: ByteArray?): ByteArray {
+        cache?.let { require(it.size == Secp256k1.ICEBERG_SHARE_CACHE_SIZE) }
+        memScoped {
+            val nShare = allocIcebergShare(share)
+            val nCache = cache?.let { allocIcebergCache(it) }
+            val nPubshare = alloc<secp256k1_iceberg_pubshare>()
+            secp256k1_iceberg_pubshare_gen(ctx, nPubshare.ptr, nShare.ptr, nCache?.ptr).requireSuccess("secp256k1_iceberg_pubshare_gen() failed")
+            val out = allocArray<UByteVar>(Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE)
+            secp256k1_iceberg_pubshare_serialize(ctx, out, nPubshare.ptr).requireSuccess("secp256k1_iceberg_pubshare_serialize() failed")
+            return out.readBytes(Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE)
+        }
+    }
+
+    override fun icebergPubkeyAgg(pubshares: Array<ByteArray>, n: Int, t: Int): ByteArray {
+        require(pubshares.isNotEmpty())
+        pubshares.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE) { "public share must be ${Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE} bytes" } }
+        memScoped {
+            val nPubshares = pubshares.map { allocIcebergPubshare(it).ptr }.toCValues()
+            val nGroupPk = alloc<secp256k1_pubkey>()
+            secp256k1_iceberg_pubkey_agg(ctx, nGroupPk.ptr, nPubshares, pubshares.size.convert(), n.toUInt(), t.toUInt()).requireSuccess("secp256k1_iceberg_pubkey_agg() failed")
+            return serializePubkey(nGroupPk)
+        }
+    }
+
+    override fun icebergNonceGen(share: ByteArray, cache: ByteArray?, sid32: ByteArray): ByteArray {
+        require(sid32.size == 32)
+        cache?.let { require(it.size == Secp256k1.ICEBERG_SHARE_CACHE_SIZE) }
+        memScoped {
+            val nShare = allocIcebergShare(share)
+            val nCache = cache?.let { allocIcebergCache(it) }
+            val nPubnonce = alloc<secp256k1_iceberg_pubnonce>()
+            secp256k1_iceberg_nonce_gen(ctx, nPubnonce.ptr, nShare.ptr, nCache?.ptr, toNat(sid32)).requireSuccess("secp256k1_iceberg_nonce_gen() failed")
+            val out = allocArray<UByteVar>(Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE)
+            secp256k1_iceberg_pubnonce_serialize(ctx, out, nPubnonce.ptr).requireSuccess("secp256k1_iceberg_pubnonce_serialize() failed")
+            return out.readBytes(Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE)
+        }
+    }
+
+    override fun icebergNonceAgg(pubnonces: Array<ByteArray>, n: Int, t: Int, groupPubkey: ByteArray): ByteArray {
+        require(pubnonces.isNotEmpty())
+        pubnonces.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE} bytes" } }
+        memScoped {
+            val nPubnonces = pubnonces.map { allocIcebergPubnonce(it).ptr }.toCValues()
+            val nGroupPk = allocPublicKey(groupPubkey)
+            val nMusigPubnonce = alloc<secp256k1_musig_pubnonce>()
+            secp256k1_iceberg_nonce_agg(ctx, nMusigPubnonce.ptr, null, nPubnonces, pubnonces.size.convert(), n.toUInt(), t.toUInt(), nGroupPk.ptr).requireSuccess("secp256k1_iceberg_nonce_agg() failed")
+            val out = allocArray<UByteVar>(Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
+            secp256k1_musig_pubnonce_serialize(ctx, out, nMusigPubnonce.ptr).requireSuccess("secp256k1_musig_pubnonce_serialize() failed")
+            return out.readBytes(Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
+        }
+    }
+
+    override fun icebergKeyaggCheck(keyaggCache: ByteArray, pubkeys: Array<ByteArray>, groupPubkey: ByteArray): Boolean {
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        require(pubkeys.isNotEmpty())
+        memScoped {
+            val nKeyAggCache = allocMusigKeyaggCache(keyaggCache)
+            val nPubkeys = pubkeys.map { allocPublicKey(it).ptr }.toCValues()
+            val nGroupPk = allocPublicKey(groupPubkey)
+            return secp256k1_iceberg_keyagg_check(ctx, nKeyAggCache.ptr, nPubkeys, pubkeys.size.convert(), nGroupPk.ptr) == 1
+        }
+    }
+
+    override fun icebergPartialSign(share: ByteArray, cache: ByteArray?, sid32: ByteArray, pubnonces: Array<ByteArray>, groupPubkey: ByteArray, keyaggCache: ByteArray, msg32: ByteArray, cosignerAggnonce: ByteArray): ByteArray {
+        require(sid32.size == 32)
+        require(msg32.size == 32)
+        cache?.let { require(it.size == Secp256k1.ICEBERG_SHARE_CACHE_SIZE) }
+        require(pubnonces.isNotEmpty())
+        pubnonces.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE} bytes" } }
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
+        memScoped {
+            val nShare = allocIcebergShare(share)
+            val nCache = cache?.let { allocIcebergCache(it) }
+            val nPubnonces = pubnonces.map { allocIcebergPubnonce(it).ptr }.toCValues()
+            val nGroupPk = allocPublicKey(groupPubkey)
+            val nKeyAggCache = allocMusigKeyaggCache(keyaggCache)
+            val nCosignerAggnonce = allocMusigAggnonce(cosignerAggnonce)
+            val nPsig = alloc<secp256k1_iceberg_partial_sig>()
+            secp256k1_iceberg_partial_sign(ctx, nPsig.ptr, nShare.ptr, nCache?.ptr, toNat(sid32), nPubnonces, pubnonces.size.convert(), nGroupPk.ptr, nKeyAggCache.ptr, toNat(msg32), nCosignerAggnonce.ptr).requireSuccess("secp256k1_iceberg_partial_sign() failed")
+            val out = allocArray<UByteVar>(Secp256k1.ICEBERG_PARTIAL_SIG_SIZE)
+            secp256k1_iceberg_partial_sig_serialize(ctx, out, nPsig.ptr).requireSuccess("secp256k1_iceberg_partial_sig_serialize() failed")
+            return out.readBytes(Secp256k1.ICEBERG_PARTIAL_SIG_SIZE)
+        }
+    }
+
+    override fun icebergPartialSigVerify(psig: ByteArray, pubshare: ByteArray, pubnonces: Array<ByteArray>, n: Int, t: Int, groupPubkey: ByteArray, keyaggCache: ByteArray, msg32: ByteArray, cosignerAggnonce: ByteArray): Int {
+        require(psig.size == Secp256k1.ICEBERG_PARTIAL_SIG_SIZE)
+        require(pubshare.size == Secp256k1.ICEBERG_PUBLIC_SHARE_SIZE)
+        require(pubnonces.isNotEmpty())
+        pubnonces.forEach { require(it.size == Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.ICEBERG_PUBLIC_NONCE_SIZE} bytes" } }
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        require(msg32.size == 32)
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
+        memScoped {
+            val nPsig = allocIcebergPartialSig(psig)
+            val nPubshare = allocIcebergPubshare(pubshare)
+            val nPubnonces = pubnonces.map { allocIcebergPubnonce(it).ptr }.toCValues()
+            val nGroupPk = allocPublicKey(groupPubkey)
+            val nKeyAggCache = allocMusigKeyaggCache(keyaggCache)
+            val nCosignerAggnonce = allocMusigAggnonce(cosignerAggnonce)
+            return secp256k1_iceberg_partial_sig_verify(ctx, nPsig.ptr, nPubshare.ptr, nPubnonces, pubnonces.size.convert(), n.toUInt(), t.toUInt(), nGroupPk.ptr, nKeyAggCache.ptr, toNat(msg32), nCosignerAggnonce.ptr)
+        }
+    }
+
+    override fun icebergPartialSigAgg(psigs: Array<ByteArray>, n: Int, t: Int): ByteArray {
+        require(psigs.isNotEmpty())
+        psigs.forEach { require(it.size == Secp256k1.ICEBERG_PARTIAL_SIG_SIZE) { "signature share must be ${Secp256k1.ICEBERG_PARTIAL_SIG_SIZE} bytes" } }
+        memScoped {
+            val nPsigs = psigs.map { allocIcebergPartialSig(it).ptr }.toCValues()
+            val nMusigPsig = alloc<secp256k1_musig_partial_sig>()
+            secp256k1_iceberg_partial_sig_agg(ctx, nMusigPsig.ptr, nPsigs, psigs.size.convert(), n.toUInt(), t.toUInt()).requireSuccess("secp256k1_iceberg_partial_sig_agg() failed")
+            val out = ByteArray(32)
+            secp256k1_musig_partial_sig_serialize(ctx, toNat(out), nMusigPsig.ptr).requireSuccess("secp256k1_musig_partial_sig_serialize() failed")
+            return out
+        }
+    }
 }
 
 internal actual fun getSecpk256k1(): Secp256k1 = Secp256k1Native

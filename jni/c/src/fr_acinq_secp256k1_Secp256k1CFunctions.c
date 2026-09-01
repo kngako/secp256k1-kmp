@@ -11,6 +11,8 @@
 #include "include/secp256k1_ecdh.h"
 #include "include/secp256k1_musig.h"
 #include "include/secp256k1_frost.h"
+#include "include/secp256k1_iceberg.h"
+#include "include/secp256k1_iceberg_dealer.h"
 #include "include/secp256k1_recovery.h"
 #include "include/secp256k1_schnorrsig.h"
 
@@ -39,6 +41,10 @@ static const unsigned char CHILLDKG_PARTICIPANT_STATE1_MAGIC[4] = { 0x3f, 0x2c, 
 static const unsigned char CHILLDKG_PARTICIPANT_STATE2_MAGIC[4] = { 0x7a, 0xd1, 0x44, 0x0b };
 static const unsigned char CHILLDKG_COORDINATOR_STATE_MAGIC[4] = { 0x1b, 0x8e, 0x63, 0xa7 };
 static const unsigned char CHILLDKG_PARTICIPANT_INV_DATA_MAGIC[4] = { 0x62, 0x4a, 0xc5, 0x90 };
+
+/* The only iceberg object without a serialized form.
+ * Keep in sync with native/secp256k1/src/modules/iceberg/keygen_impl.h. */
+static const unsigned char ICEBERG_SHARE_CACHE_MAGIC[4] = { 0x1c, 0xeb, 0xc4, 0x03 };
 
 #define CHECKMAGIC(data, magic, message) CHECKRESULT(memcmp((data), (magic), 4) != 0, message)
 
@@ -2479,4 +2485,470 @@ JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1ch
     free(cinv);
     if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
     return result;
+}
+
+
+/* Parses a serialized iceberg share (variable length). Returns 1 on success, 0 on failure
+ * (exception pending). */
+static inline int get_iceberg_share(JNIEnv* penv, const secp256k1_context* ctx, jbyteArray jshare, secp256k1_iceberg_share* share)
+{
+    unsigned char* bytes = NULL;
+    size_t len = 0;
+    int result;
+
+    if (jshare == NULL) {
+        JNI_ThrowNull(penv, "share");
+        return 0;
+    }
+    if (!get_var_bytes(penv, jshare, &bytes, &len, "share")) return 0;
+    result = secp256k1_iceberg_share_parse(ctx, share, bytes, len);
+    free(bytes);
+    if (!result) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_iceberg_share_parse failed");
+        return 0;
+    }
+    return 1;
+}
+
+/* Loads a raw iceberg share cache blob, checking its magic prefix. Returns 1 on success, 0 on
+ * failure (exception pending). A NULL java array leaves the cache untouched and returns 1. */
+static inline int get_iceberg_cache(JNIEnv* penv, jbyteArray jcache, secp256k1_iceberg_share_cache* cache, int* present)
+{
+    if (jcache == NULL) {
+        *present = 0;
+        return 1;
+    }
+    if (!get_bytes(penv, jcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_CACHE_SIZE, cache->data, "share cache")) return 0;
+    CHECKMAGIC(cache->data, ICEBERG_SHARE_CACHE_MAGIC, "invalid share cache");
+    *present = 1;
+    return 1;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_shares_gen
+ * Signature: (JII[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1shares_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jint jn, jint jt, jbyteArray jseed32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char seed32[32];
+    unsigned char* share_bytes = NULL;
+    unsigned char* out;
+    secp256k1_iceberg_share* shares;
+    secp256k1_iceberg_share** share_ptrs;
+    size_t i, n, share_len = 0;
+    int result = 0;
+    jbyteArray jout;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jseed32, seed32, "seed")) return NULL;
+    CHECKRESULT(jn < 1 || jn > SECP256K1_ICEBERG_MAX_PARTICIPANTS, "invalid number of participants");
+    CHECKRESULT(jt < 1 || jt > (jn + 1) / 2, "invalid threshold");
+    n = (size_t)jn;
+
+    shares = calloc(n, sizeof(secp256k1_iceberg_share));
+    CHECKRESULT(shares == NULL, "memory allocation failed");
+    share_ptrs = calloc(n, sizeof(secp256k1_iceberg_share*));
+    CHECKRESULT1(share_ptrs == NULL, "memory allocation failed", free(shares));
+    for (i = 0; i < n; i++) share_ptrs[i] = &shares[i];
+
+    result = secp256k1_iceberg_shares_gen(ctx, share_ptrs, (unsigned int)n, (unsigned int)jt, seed32);
+    CHECKRESULT1(!result, "secp256k1_iceberg_shares_gen failed", free(share_ptrs); free(shares));
+
+    /* all shares of a group serialize to the same length */
+    share_bytes = malloc(fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_MAX_SIZE);
+    CHECKRESULT1(share_bytes == NULL, "memory allocation failed", free(share_ptrs); free(shares));
+    share_len = fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_MAX_SIZE;
+    result = secp256k1_iceberg_share_serialize(ctx, share_bytes, &share_len, &shares[0]);
+    CHECKRESULT1(!result, "secp256k1_iceberg_share_serialize failed", free(share_bytes); free(share_ptrs); free(shares));
+
+    out = malloc(share_len * n);
+    CHECKRESULT1(out == NULL, "memory allocation failed", free(share_bytes); free(share_ptrs); free(shares));
+    memcpy(out, share_bytes, share_len);
+    for (i = 1; i < n; i++) {
+        size_t len = fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_MAX_SIZE;
+        result = secp256k1_iceberg_share_serialize(ctx, share_bytes, &len, &shares[i]);
+        CHECKRESULT1(!result || len != share_len, "secp256k1_iceberg_share_serialize failed", free(out); free(share_bytes); free(share_ptrs); free(shares));
+        memcpy(out + share_len * i, share_bytes, share_len);
+    }
+
+    jout = copy_bytes_to_java(penv, out, share_len * n);
+    free(out);
+    free(share_bytes);
+    free(share_ptrs);
+    free(shares);
+    return jout;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_share_cache_create
+ * Signature: (J[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1share_1cache_1create(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_iceberg_share share;
+    secp256k1_iceberg_share_cache cache;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_iceberg_share(penv, ctx, jshare, &share)) return NULL;
+
+    result = secp256k1_iceberg_share_cache_create(ctx, &cache, &share);
+    CHECKRESULT(!result, "secp256k1_iceberg_share_cache_create failed");
+
+    return copy_bytes_to_java(penv, cache.data, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_CACHE_SIZE);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_pubshare_gen
+ * Signature: (J[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1pubshare_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jcache)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_iceberg_share share;
+    secp256k1_iceberg_share_cache cache;
+    secp256k1_iceberg_pubshare pubshare;
+    unsigned char out34[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_SHARE_SIZE];
+    int has_cache = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_iceberg_share(penv, ctx, jshare, &share)) return NULL;
+    if (!get_iceberg_cache(penv, jcache, &cache, &has_cache)) return NULL;
+
+    result = secp256k1_iceberg_pubshare_gen(ctx, &pubshare, &share, has_cache ? &cache : NULL);
+    CHECKRESULT(!result, "secp256k1_iceberg_pubshare_gen failed");
+
+    result = secp256k1_iceberg_pubshare_serialize(ctx, out34, &pubshare);
+    CHECKRESULT(!result, "secp256k1_iceberg_pubshare_serialize failed");
+
+    return copy_bytes_to_java(penv, out34, sizeof(out34));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_pubkey_agg
+ * Signature: (J[[BII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1pubkey_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jpubshares, jint jn, jint jt)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char** flat = NULL;
+    secp256k1_iceberg_pubshare* pubshares = NULL;
+    secp256k1_iceberg_pubshare** pubshare_ptrs = NULL;
+    secp256k1_pubkey group_pk;
+    unsigned char pub[65];
+    size_t count = 0, i, size;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jpubshares == NULL, "public shares cannot be null");
+    if (!get_msg_ptrs(penv, jpubshares, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_SHARE_SIZE, &flat, &count, "public share")) return NULL;
+
+    pubshares = calloc(count, sizeof(secp256k1_iceberg_pubshare));
+    pubshare_ptrs = calloc(count, sizeof(secp256k1_iceberg_pubshare*));
+    CHECKRESULT1(pubshares == NULL || pubshare_ptrs == NULL, "memory allocation failed", free(flat[0]); free(flat); free(pubshares); free(pubshare_ptrs));
+    for (i = 0; i < count; i++) {
+        pubshare_ptrs[i] = &pubshares[i];
+        result = secp256k1_iceberg_pubshare_parse(ctx, pubshare_ptrs[i], flat[i]);
+        CHECKRESULT1(!result, "secp256k1_iceberg_pubshare_parse failed", free(flat[0]); free(flat); free(pubshares); free(pubshare_ptrs));
+    }
+    free(flat[0]);
+    free(flat);
+
+    result = secp256k1_iceberg_pubkey_agg(ctx, &group_pk, (const secp256k1_iceberg_pubshare* const*)pubshare_ptrs, count, (unsigned int)jn, (unsigned int)jt);
+    free(pubshares);
+    free(pubshare_ptrs);
+    CHECKRESULT(!result, "secp256k1_iceberg_pubkey_agg failed");
+
+    size = 65;
+    result = secp256k1_ec_pubkey_serialize(ctx, pub, &size, &group_pk, SECP256K1_EC_UNCOMPRESSED);
+    CHECKRESULT(!result, "secp256k1_ec_pubkey_serialize failed");
+
+    return copy_bytes_to_java(penv, pub, 65);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_nonce_gen
+ * Signature: (J[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1nonce_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jcache, jbyteArray jsid32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_iceberg_share share;
+    secp256k1_iceberg_share_cache cache;
+    secp256k1_iceberg_pubnonce pubnonce;
+    unsigned char sid32[32];
+    unsigned char out67[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_NONCE_SIZE];
+    int has_cache = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_iceberg_share(penv, ctx, jshare, &share)) return NULL;
+    if (!get_iceberg_cache(penv, jcache, &cache, &has_cache)) return NULL;
+    if (!get_bytes32(penv, jsid32, sid32, "session label")) return NULL;
+
+    result = secp256k1_iceberg_nonce_gen(ctx, &pubnonce, &share, has_cache ? &cache : NULL, sid32);
+    CHECKRESULT(!result, "secp256k1_iceberg_nonce_gen failed");
+
+    result = secp256k1_iceberg_pubnonce_serialize(ctx, out67, &pubnonce);
+    CHECKRESULT(!result, "secp256k1_iceberg_pubnonce_serialize failed");
+
+    return copy_bytes_to_java(penv, out67, sizeof(out67));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_nonce_agg
+ * Signature: (J[[BII[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1nonce_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jpubnonces, jint jn, jint jt, jbyteArray jgrouppk)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char** flat = NULL;
+    secp256k1_iceberg_pubnonce* pubnonces = NULL;
+    secp256k1_iceberg_pubnonce** pubnonce_ptrs = NULL;
+    secp256k1_pubkey group_pk;
+    secp256k1_musig_pubnonce musig_pubnonce;
+    unsigned char out66[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_PUBLIC_NONCE_SIZE];
+    size_t count = 0, i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_pubkey(penv, ctx, jgrouppk, &group_pk)) return NULL;
+    CHECKRESULT(jpubnonces == NULL, "public nonces cannot be null");
+    if (!get_msg_ptrs(penv, jpubnonces, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_NONCE_SIZE, &flat, &count, "public nonce")) return NULL;
+
+    pubnonces = calloc(count, sizeof(secp256k1_iceberg_pubnonce));
+    pubnonce_ptrs = calloc(count, sizeof(secp256k1_iceberg_pubnonce*));
+    CHECKRESULT1(pubnonces == NULL || pubnonce_ptrs == NULL, "memory allocation failed", free(flat[0]); free(flat); free(pubnonces); free(pubnonce_ptrs));
+    for (i = 0; i < count; i++) {
+        pubnonce_ptrs[i] = &pubnonces[i];
+        result = secp256k1_iceberg_pubnonce_parse(ctx, pubnonce_ptrs[i], flat[i]);
+        CHECKRESULT1(!result, "secp256k1_iceberg_pubnonce_parse failed", free(flat[0]); free(flat); free(pubnonces); free(pubnonce_ptrs));
+    }
+    free(flat[0]);
+    free(flat);
+
+    result = secp256k1_iceberg_nonce_agg(ctx, &musig_pubnonce, NULL, (const secp256k1_iceberg_pubnonce* const*)pubnonce_ptrs, count, (unsigned int)jn, (unsigned int)jt, &group_pk);
+    free(pubnonces);
+    free(pubnonce_ptrs);
+    CHECKRESULT(!result, "secp256k1_iceberg_nonce_agg failed");
+
+    result = secp256k1_musig_pubnonce_serialize(ctx, out66, &musig_pubnonce);
+    CHECKRESULT(!result, "secp256k1_musig_pubnonce_serialize failed");
+
+    return copy_bytes_to_java(penv, out66, sizeof(out66));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_keyagg_check
+ * Signature: (J[B[[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1keyagg_1check(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jkeyaggcache, jobjectArray jpubkeys, jbyteArray jgrouppk)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_musig_keyagg_cache keyaggcache;
+    secp256k1_pubkey* pubkeys;
+    secp256k1_pubkey** pubkey_ptrs;
+    secp256k1_pubkey group_pk;
+    jbyteArray jpubkey;
+    size_t count;
+    size_t i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jkeyaggcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_KEYAGG_CACHE_SIZE, keyaggcache.data, "keyagg cache")) return 0;
+    CHECKMAGIC(keyaggcache.data, MUSIG_KEYAGG_CACHE_MAGIC, "invalid keyagg cache");
+    if (!get_pubkey(penv, ctx, jgrouppk, &group_pk)) return 0;
+    CHECKRESULT(jpubkeys == NULL, "public keys cannot be null");
+
+    count = (*penv)->GetArrayLength(penv, jpubkeys);
+    CHECKRESULT(count < 1, "public keys cannot be empty");
+    pubkeys = calloc(count, sizeof(secp256k1_pubkey));
+    CHECKRESULT(pubkeys == NULL, "memory allocation failed");
+    pubkey_ptrs = calloc(count, sizeof(secp256k1_pubkey*));
+    CHECKRESULT1(pubkey_ptrs == NULL, "memory allocation failed", free(pubkeys));
+
+    for (i = 0; i < count; i++) {
+        pubkey_ptrs[i] = &(pubkeys[i]);
+        jpubkey = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jpubkeys, i);
+        if (!get_pubkey(penv, ctx, jpubkey, pubkey_ptrs[i])) {
+            (*penv)->DeleteLocalRef(penv, jpubkey);
+            free(pubkey_ptrs);
+            free(pubkeys);
+            return 0;
+        }
+        (*penv)->DeleteLocalRef(penv, jpubkey);
+    }
+    result = secp256k1_iceberg_keyagg_check(ctx, &keyaggcache, (const secp256k1_pubkey* const*)pubkey_ptrs, count, &group_pk);
+    free(pubkey_ptrs);
+    free(pubkeys);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_partial_sign
+ * Signature: (J[B[B[B[[B[B[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1partial_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jcache, jbyteArray jsid32, jobjectArray jpubnonces, jbyteArray jgrouppk, jbyteArray jkeyaggcache, jbyteArray jmsg32, jbyteArray jcosigneraggnonce)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_iceberg_share share;
+    secp256k1_iceberg_share_cache cache;
+    unsigned char** flat = NULL;
+    secp256k1_iceberg_pubnonce* pubnonces = NULL;
+    secp256k1_iceberg_pubnonce** pubnonce_ptrs = NULL;
+    secp256k1_pubkey group_pk;
+    secp256k1_musig_keyagg_cache keyaggcache;
+    secp256k1_musig_aggnonce cosigner_aggnonce;
+    secp256k1_iceberg_partial_sig psig;
+    unsigned char sid32[32], msg32[32], in66[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_PUBLIC_NONCE_SIZE];
+    unsigned char out33[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PARTIAL_SIG_SIZE];
+    size_t count = 0, i;
+    int has_cache = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_iceberg_share(penv, ctx, jshare, &share)) return NULL;
+    if (!get_iceberg_cache(penv, jcache, &cache, &has_cache)) return NULL;
+    if (!get_bytes32(penv, jsid32, sid32, "session label")) return NULL;
+    if (!get_bytes32(penv, jmsg32, msg32, "message")) return NULL;
+    if (!get_pubkey(penv, ctx, jgrouppk, &group_pk)) return NULL;
+    if (!get_bytes(penv, jkeyaggcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_KEYAGG_CACHE_SIZE, keyaggcache.data, "keyagg cache")) return NULL;
+    CHECKMAGIC(keyaggcache.data, MUSIG_KEYAGG_CACHE_MAGIC, "invalid keyagg cache");
+    if (!get_bytes(penv, jcosigneraggnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_PUBLIC_NONCE_SIZE, in66, "cosigner aggregate nonce")) return NULL;
+    result = secp256k1_musig_aggnonce_parse(ctx, &cosigner_aggnonce, in66);
+    CHECKRESULT(!result, "secp256k1_musig_aggnonce_parse failed");
+
+    CHECKRESULT(jpubnonces == NULL, "public nonces cannot be null");
+    if (!get_msg_ptrs(penv, jpubnonces, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_NONCE_SIZE, &flat, &count, "public nonce")) return NULL;
+    pubnonces = calloc(count, sizeof(secp256k1_iceberg_pubnonce));
+    pubnonce_ptrs = calloc(count, sizeof(secp256k1_iceberg_pubnonce*));
+    CHECKRESULT1(pubnonces == NULL || pubnonce_ptrs == NULL, "memory allocation failed", free(flat[0]); free(flat); free(pubnonces); free(pubnonce_ptrs));
+    for (i = 0; i < count; i++) {
+        pubnonce_ptrs[i] = &pubnonces[i];
+        result = secp256k1_iceberg_pubnonce_parse(ctx, pubnonce_ptrs[i], flat[i]);
+        CHECKRESULT1(!result, "secp256k1_iceberg_pubnonce_parse failed", free(flat[0]); free(flat); free(pubnonces); free(pubnonce_ptrs));
+    }
+    free(flat[0]);
+    free(flat);
+
+    result = secp256k1_iceberg_partial_sign(ctx, &psig, &share, has_cache ? &cache : NULL, sid32, (const secp256k1_iceberg_pubnonce* const*)pubnonce_ptrs, count, &group_pk, &keyaggcache, msg32, &cosigner_aggnonce);
+    free(pubnonces);
+    free(pubnonce_ptrs);
+    CHECKRESULT(!result, "secp256k1_iceberg_partial_sign failed");
+
+    result = secp256k1_iceberg_partial_sig_serialize(ctx, out33, &psig);
+    CHECKRESULT(!result, "secp256k1_iceberg_partial_sig_serialize failed");
+
+    return copy_bytes_to_java(penv, out33, sizeof(out33));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_partial_sig_verify
+ * Signature: (J[B[B[[BII[B[B[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1partial_1sig_1verify(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jpsig, jbyteArray jpubshare, jobjectArray jpubnonces, jint jn, jint jt, jbyteArray jgrouppk, jbyteArray jkeyaggcache, jbyteArray jmsg32, jbyteArray jcosigneraggnonce)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_iceberg_partial_sig psig;
+    secp256k1_iceberg_pubshare pubshare;
+    unsigned char** flat = NULL;
+    secp256k1_iceberg_pubnonce* pubnonces = NULL;
+    secp256k1_iceberg_pubnonce** pubnonce_ptrs = NULL;
+    secp256k1_pubkey group_pk;
+    secp256k1_musig_keyagg_cache keyaggcache;
+    secp256k1_musig_aggnonce cosigner_aggnonce;
+    unsigned char msg32[32];
+    unsigned char in66[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_PUBLIC_NONCE_SIZE];
+    unsigned char in33[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PARTIAL_SIG_SIZE];
+    unsigned char in34[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_SHARE_SIZE];
+    size_t count = 0, i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jpsig, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PARTIAL_SIG_SIZE, in33, "signature share")) return 0;
+    if (!get_bytes(penv, jpubshare, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_SHARE_SIZE, in34, "public share")) return 0;
+    if (!get_bytes32(penv, jmsg32, msg32, "message")) return 0;
+    if (!get_pubkey(penv, ctx, jgrouppk, &group_pk)) return 0;
+    if (!get_bytes(penv, jkeyaggcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_KEYAGG_CACHE_SIZE, keyaggcache.data, "keyagg cache")) return 0;
+    CHECKMAGIC(keyaggcache.data, MUSIG_KEYAGG_CACHE_MAGIC, "invalid keyagg cache");
+    if (!get_bytes(penv, jcosigneraggnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_PUBLIC_NONCE_SIZE, in66, "cosigner aggregate nonce")) return 0;
+
+    result = secp256k1_iceberg_partial_sig_parse(ctx, &psig, in33);
+    CHECKRESULT(!result, "secp256k1_iceberg_partial_sig_parse failed");
+    result = secp256k1_iceberg_pubshare_parse(ctx, &pubshare, in34);
+    CHECKRESULT(!result, "secp256k1_iceberg_pubshare_parse failed");
+    result = secp256k1_musig_aggnonce_parse(ctx, &cosigner_aggnonce, in66);
+    CHECKRESULT(!result, "secp256k1_musig_aggnonce_parse failed");
+
+    CHECKRESULT(jpubnonces == NULL, "public nonces cannot be null");
+    if (!get_msg_ptrs(penv, jpubnonces, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_NONCE_SIZE, &flat, &count, "public nonce")) return 0;
+    pubnonces = calloc(count, sizeof(secp256k1_iceberg_pubnonce));
+    pubnonce_ptrs = calloc(count, sizeof(secp256k1_iceberg_pubnonce*));
+    CHECKRESULT1(pubnonces == NULL || pubnonce_ptrs == NULL, "memory allocation failed", free(flat[0]); free(flat); free(pubnonces); free(pubnonce_ptrs));
+    for (i = 0; i < count; i++) {
+        pubnonce_ptrs[i] = &pubnonces[i];
+        result = secp256k1_iceberg_pubnonce_parse(ctx, pubnonce_ptrs[i], flat[i]);
+        CHECKRESULT1(!result, "secp256k1_iceberg_pubnonce_parse failed", free(flat[0]); free(flat); free(pubnonces); free(pubnonce_ptrs));
+    }
+    free(flat[0]);
+    free(flat);
+
+    result = secp256k1_iceberg_partial_sig_verify(ctx, &psig, &pubshare, (const secp256k1_iceberg_pubnonce* const*)pubnonce_ptrs, count, (unsigned int)jn, (unsigned int)jt, &group_pk, &keyaggcache, msg32, &cosigner_aggnonce);
+    free(pubnonces);
+    free(pubnonce_ptrs);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_partial_sig_agg
+ * Signature: (J[[BII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1partial_1sig_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jpsigs, jint jn, jint jt)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char** flat = NULL;
+    secp256k1_iceberg_partial_sig* psigs = NULL;
+    secp256k1_iceberg_partial_sig** psig_ptrs = NULL;
+    secp256k1_musig_partial_sig musig_psig;
+    unsigned char out32[32];
+    size_t count = 0, i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jpsigs == NULL, "signature shares cannot be null");
+    if (!get_msg_ptrs(penv, jpsigs, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PARTIAL_SIG_SIZE, &flat, &count, "signature share")) return NULL;
+
+    psigs = calloc(count, sizeof(secp256k1_iceberg_partial_sig));
+    psig_ptrs = calloc(count, sizeof(secp256k1_iceberg_partial_sig*));
+    CHECKRESULT1(psigs == NULL || psig_ptrs == NULL, "memory allocation failed", free(flat[0]); free(flat); free(psigs); free(psig_ptrs));
+    for (i = 0; i < count; i++) {
+        psig_ptrs[i] = &psigs[i];
+        result = secp256k1_iceberg_partial_sig_parse(ctx, psig_ptrs[i], flat[i]);
+        CHECKRESULT1(!result, "secp256k1_iceberg_partial_sig_parse failed", free(flat[0]); free(flat); free(psigs); free(psig_ptrs));
+    }
+    free(flat[0]);
+    free(flat);
+
+    result = secp256k1_iceberg_partial_sig_agg(ctx, &musig_psig, (const secp256k1_iceberg_partial_sig* const*)psig_ptrs, count, (unsigned int)jn, (unsigned int)jt);
+    free(psigs);
+    free(psig_ptrs);
+    CHECKRESULT(!result, "secp256k1_iceberg_partial_sig_agg failed");
+
+    result = secp256k1_musig_partial_sig_serialize(ctx, out32, &musig_psig);
+    CHECKRESULT(!result, "secp256k1_musig_partial_sig_serialize failed");
+
+    return copy_bytes_to_java(penv, out32, 32);
 }

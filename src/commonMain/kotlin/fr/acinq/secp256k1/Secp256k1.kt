@@ -663,6 +663,145 @@ public interface Secp256k1 {
      * @return the fault report identifying the suspected faulty party.
      */
     public fun chilldkgParticipantInvestigate(investigationData: ByteArray, cinv: ByteArray): ChilldkgFault
+
+    /**
+     * Deal the shares of an Iceberg group from a single seed (trusted dealer).
+     *
+     * Iceberg is a threshold scheme that lets a group of parties stand in for a single MuSig2 participant. The
+     * group's public key (see [icebergPubkeyAgg]) is aggregated with the cosigners' keys with [musigPubkeyAgg],
+     * and the group produces one ordinary MuSig2 public nonce and partial signature per signing session, so
+     * cosigners cannot tell a group is involved.
+     *
+     * WARNING: the underlying secp256k1 Iceberg module is experimental ("neither the scheme nor this
+     * implementation has been reviewed by anyone outside the project") and must not be used to protect anything
+     * of value. A trusted dealer momentarily holds everything needed to reconstruct the group's private key; the
+     * seed must be erased afterwards.
+     *
+     * @param n number of participants (at most [ICEBERG_MAX_PARTICIPANTS]).
+     * @param t threshold: the quorum is 2t-1 participants, so t must be at most (n+1)/2 (2-of-2 and 3-of-4 are
+     * inexpressible; 2-of-4 is the smallest usable group).
+     * @param seed32 32 bytes of uniformly random data.
+     * @return the serialized share of each participant (entry k belongs to participant k+1: participant indices
+     * are 1-based).
+     */
+    public fun icebergSharesGen(n: Int, t: Int, seed32: ByteArray): Array<ByteArray>
+
+    /**
+     * Derive the Lagrange weights for an Iceberg share (an optimization: [icebergPubshareGen], [icebergNonceGen]
+     * and [icebergPartialSign] recompute them when no cache is provided). The cache contains no secret material,
+     * but has no serialized form: it is returned as an opaque [ICEBERG_SHARE_CACHE_SIZE]-byte blob.
+     *
+     * @param share the participant's serialized share (see [icebergSharesGen]).
+     * @return the share cache (opaque blob; rebuild it from the share rather than persisting it).
+     */
+    public fun icebergShareCacheCreate(share: ByteArray): ByteArray
+
+    /**
+     * Compute a participant's Iceberg public key share.
+     *
+     * @param share the participant's serialized share.
+     * @param cache (optional) the participant's share cache (see [icebergShareCacheCreate]).
+     * @return 34-byte serialized public key share, meant to be published.
+     */
+    public fun icebergPubshareGen(share: ByteArray, cache: ByteArray?): ByteArray
+
+    /**
+     * Verify Iceberg public key shares and combine them into the group's public key.
+     *
+     * @param pubshares 34-byte public key shares (at least 2t-1, at most n).
+     * @param n group size the shares were dealt for.
+     * @param t threshold.
+     * @return the group's public key (65 bytes, uncompressed), to be aggregated with the cosigners' keys with
+     * [musigPubkeyAgg] exactly as if it belonged to a single signer.
+     */
+    public fun icebergPubkeyAgg(pubshares: Array<ByteArray>, n: Int, t: Int): ByteArray
+
+    /**
+     * Derive a participant's nonce contribution for a signing session. It depends only on the share and the
+     * session label, so this round can run before the message exists, and there is no secret nonce to keep
+     * between the two rounds.
+     *
+     * @param share the participant's serialized share.
+     * @param cache (optional) the participant's share cache.
+     * @param sid32 32-byte session label: public, need not be random, but must never be used twice by the group.
+     * @return 67-byte serialized nonce contribution, to publish to the other group members.
+     */
+    public fun icebergNonceGen(share: ByteArray, cache: ByteArray?, sid32: ByteArray): ByteArray
+
+    /**
+     * Verify the group members' nonce contributions and combine them into one ordinary MuSig2 public nonce.
+     * From that nonce upwards, signing is plain MuSig2.
+     *
+     * @param pubnonces 67-byte nonce contributions (at least 2t-1, at most n).
+     * @param n group size.
+     * @param t threshold.
+     * @param groupPubkey the group's public key (see [icebergPubkeyAgg]).
+     * @return 66-byte serialized MuSig2 public nonce, to publish to the cosigners.
+     */
+    public fun icebergNonceAgg(pubnonces: Array<ByteArray>, n: Int, t: Int, groupPubkey: ByteArray): ByteArray
+
+    /**
+     * Check that a MuSig2 key aggregation cache aggregates exactly the given list of public keys, in this order,
+     * and that the group's public key is one of them. Run this once where the cache is built: signing with a
+     * cache built over a different key set spends the session label on a useless signature share.
+     *
+     * @param keyaggCache the outer MuSig2 key aggregation cache (see [musigPubkeyAgg]).
+     * @param pubkeys the keys the cache should have been built from, in the order they were passed to
+     * [musigPubkeyAgg].
+     * @param groupPubkey the group's public key, which must be one of [pubkeys].
+     * @return true if the cache aggregates exactly this key list and contains the group's public key.
+     */
+    public fun icebergKeyaggCheck(keyaggCache: ByteArray, pubkeys: Array<ByteArray>, groupPubkey: ByteArray): Boolean
+
+    /**
+     * Produce a participant's Iceberg signature share.
+     *
+     * Never call this twice with the same [sid32], whatever else changes: a participant's secrets are fixed by
+     * the label alone, so two answers under one label leak the share by elimination. Callers must durably record
+     * the labels they have answered under.
+     *
+     * @param share the participant's serialized share.
+     * @param cache (optional) the participant's share cache.
+     * @param sid32 the session label, the same one [icebergNonceGen] used.
+     * @param pubnonces the group's own 67-byte nonce contributions (at least 2t-1; any qualifying set from the
+     * session gives the same result).
+     * @param groupPubkey the group's public key (the one [icebergNonceAgg] was given).
+     * @param keyaggCache the outer MuSig2 key aggregation cache (see [icebergKeyaggCheck]).
+     * @param msg32 32-byte message being signed.
+     * @param cosignerAggnonce the cosigners' aggregate nonce, theirs alone (see [musigNonceAgg]).
+     * @return 33-byte serialized signature share, to publish to the other group members.
+     */
+    public fun icebergPartialSign(share: ByteArray, cache: ByteArray?, sid32: ByteArray, pubnonces: Array<ByteArray>, groupPubkey: ByteArray, keyaggCache: ByteArray, msg32: ByteArray, cosignerAggnonce: ByteArray): ByteArray
+
+    /**
+     * Check one Iceberg signature share against what its author published. A 0 means the share does not satisfy
+     * the signing equation against these inputs: it does not distinguish a bad share from bad inputs, and does
+     * not name a culprit.
+     *
+     * @param psig 33-byte signature share to check.
+     * @param pubshare 34-byte public key share of the participant the signature share is attributed to.
+     * @param pubnonces a qualifying set of 67-byte nonce contributions from the same session (at least 2t-1).
+     * @param n group size.
+     * @param t threshold.
+     * @param groupPubkey the group's public key.
+     * @param keyaggCache the outer MuSig2 key aggregation cache.
+     * @param msg32 32-byte message being signed.
+     * @param cosignerAggnonce the cosigners' aggregate nonce.
+     * @return result code (1 if the signature share is valid, 0 otherwise).
+     */
+    public fun icebergPartialSigVerify(psig: ByteArray, pubshare: ByteArray, pubnonces: Array<ByteArray>, n: Int, t: Int, groupPubkey: ByteArray, keyaggCache: ByteArray, msg32: ByteArray, cosignerAggnonce: ByteArray): Int
+
+    /**
+     * Combine Iceberg signature shares into one ordinary MuSig2 partial signature, to be aggregated with the
+     * cosigners' partial signatures with [musigPartialSigAgg]. Given more than t shares, a self-contradicting
+     * set is refused.
+     *
+     * @param psigs 33-byte signature shares (at least t, at most n).
+     * @param n group size.
+     * @param t threshold.
+     * @return 32-byte serialized MuSig2 partial signature.
+     */
+    public fun icebergPartialSigAgg(psigs: Array<ByteArray>, n: Int, t: Int): ByteArray
     
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
@@ -685,6 +824,15 @@ public interface Secp256k1 {
         public const val CHILLDKG_PARTICIPANT_STATE2_SIZE: Int = 21073
         public const val CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE: Int = 4205
         public const val CHILLDKG_COORDINATOR_STATE_SIZE: Int = 21041
+
+        public const val ICEBERG_MAX_PARTICIPANTS: Int = 10
+        /** Largest size of a serialized Iceberg share (a share of a given group may serialize to fewer bytes). */
+        public const val ICEBERG_SHARE_MAX_SIZE: Int = 4036
+        /** Size of the opaque share cache blob (see [icebergShareCacheCreate]). */
+        public const val ICEBERG_SHARE_CACHE_SIZE: Int = 4040
+        public const val ICEBERG_PUBLIC_SHARE_SIZE: Int = 34
+        public const val ICEBERG_PUBLIC_NONCE_SIZE: Int = 67
+        public const val ICEBERG_PARTIAL_SIG_SIZE: Int = 33
         /*
          * libsecp256k1 tags each of its opaque musig2 objects with a 4-byte magic prefix and validates it
          * internally with ARG_CHECK, which invokes the context's illegal-argument callback. The default
@@ -714,6 +862,12 @@ public interface Secp256k1 {
         internal val CHILLDKG_PARTICIPANT_STATE2_MAGIC = byteArrayOf(0x7a.toByte(), 0xd1.toByte(), 0x44.toByte(), 0x0b.toByte())
         internal val CHILLDKG_COORDINATOR_STATE_MAGIC = byteArrayOf(0x1b.toByte(), 0x8e.toByte(), 0x63.toByte(), 0xa7.toByte())
         internal val CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_MAGIC = byteArrayOf(0x62.toByte(), 0x4a.toByte(), 0xc5.toByte(), 0x90.toByte())
+        /*
+         * Same thing for the opaque Iceberg share cache, the only Iceberg object without a serialized form.
+         *
+         * Keep in sync with native/secp256k1/src/modules/iceberg/keygen_impl.h.
+         */
+        internal val ICEBERG_SHARE_CACHE_MAGIC = byteArrayOf(0x1c.toByte(), 0xeb.toByte(), 0xc4.toByte(), 0x03.toByte())
         // @formatter:on
     }
 }

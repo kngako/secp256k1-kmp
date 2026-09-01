@@ -51,6 +51,16 @@ extern "C" {
 #define fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_INV_DATA_SIZE 4205L
 #undef fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE
 #define fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE 21041L
+#undef fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_MAX_SIZE
+#define fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_MAX_SIZE 4036L
+#undef fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_CACHE_SIZE
+#define fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_SHARE_CACHE_SIZE 4040L
+#undef fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_SHARE_SIZE
+#define fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_SHARE_SIZE 34L
+#undef fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_NONCE_SIZE
+#define fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PUBLIC_NONCE_SIZE 67L
+#undef fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PARTIAL_SIG_SIZE
+#define fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_ICEBERG_PARTIAL_SIG_SIZE 33L
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
  * Method:    secp256k1_context_create
@@ -538,6 +548,86 @@ JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1ch
  */
 JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1participant_1investigate
   (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_shares_gen
+ * Signature: (JII[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1shares_1gen
+  (JNIEnv *, jclass, jlong, jint, jint, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_share_cache_create
+ * Signature: (J[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1share_1cache_1create
+  (JNIEnv *, jclass, jlong, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_pubshare_gen
+ * Signature: (J[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1pubshare_1gen
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_pubkey_agg
+ * Signature: (J[[BII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1pubkey_1agg
+  (JNIEnv *, jclass, jlong, jobjectArray, jint, jint);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_nonce_gen
+ * Signature: (J[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1nonce_1gen
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_nonce_agg
+ * Signature: (J[[BII[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1nonce_1agg
+  (JNIEnv *, jclass, jlong, jobjectArray, jint, jint, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_keyagg_check
+ * Signature: (J[B[[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1keyagg_1check
+  (JNIEnv *, jclass, jlong, jbyteArray, jobjectArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_partial_sign
+ * Signature: (J[B[B[B[[B[B[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1partial_1sign
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jobjectArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_partial_sig_verify
+ * Signature: (J[B[B[[BII[B[B[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1partial_1sig_1verify
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jobjectArray, jint, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_iceberg_partial_sig_agg
+ * Signature: (J[[BII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1iceberg_1partial_1sig_1agg
+  (JNIEnv *, jclass, jlong, jobjectArray, jint, jint);
 
 #ifdef __cplusplus
 }
