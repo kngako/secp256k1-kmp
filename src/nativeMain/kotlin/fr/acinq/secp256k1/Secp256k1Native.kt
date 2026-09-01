@@ -105,6 +105,16 @@ public object Secp256k1Native : Secp256k1 {
         return pinned.addressOf(0)
     }
 
+    /**
+     * Same as [toNat], but supports empty byte arrays: the BIP-FROST reference distinguishes an absent value
+     * (null pointer) from an empty one (non-null pointer with size 0), so empty arrays must not be collapsed to
+     * null. Pinning an empty array would fail, so we allocate a dummy 1-byte buffer instead (it is never read
+     * since the size passed alongside is 0).
+     */
+    private fun MemScope.toNatAllowEmpty(bytes: ByteArray): CPointer<UByteVar> {
+        return if (bytes.isEmpty()) allocArray<UByteVar>(1) else toNat(bytes)
+    }
+
     public override fun verify(signature: ByteArray, message: ByteArray, pubkey: ByteArray): Boolean {
         require(message.size == 32)
         require(pubkey.size == 33 || pubkey.size == 65)
@@ -690,9 +700,9 @@ public object Secp256k1Native : Secp256k1 {
                 secshare32?.let { toNat(it) },
                 nPubshare?.ptr,
                 thresholdPubkey32?.let { toNat(it) },
-                msg?.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                msg?.let { toNatAllowEmpty(it) },
                 msg?.size?.convert() ?: 0uL,
-                extraInput?.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                extraInput?.let { toNatAllowEmpty(it) },
                 extraInput?.size?.convert() ?: 0uL
             ).requireSuccess("secp256k1_frost_nonce_gen() failed")
             val nPubnonceSerialized = allocArray<UByteVar>(Secp256k1.FROST_PUBLIC_NONCE_SIZE)
@@ -741,7 +751,7 @@ public object Secp256k1Native : Secp256k1 {
                 nParticipants.convert(),
                 threshold.toUInt(),
                 nCache.ptr,
-                msg.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                toNatAllowEmpty(msg),
                 msg.size.convert()
             ).requireSuccess("secp256k1_frost_session_init() failed")
             return nSession.ptr.readBytes(Secp256k1.FROST_SESSION_SIZE)
@@ -802,7 +812,7 @@ public object Secp256k1Native : Secp256k1 {
                 nParticipants.convert(),
                 threshold.toUInt(),
                 nCache.ptr,
-                msg.takeIf { it.isNotEmpty() }?.let { toNat(it) },
+                toNatAllowEmpty(msg),
                 msg.size.convert(),
                 auxRand32?.let { toNat(it) }
             ).requireSuccess("secp256k1_frost_deterministic_sign() failed")
