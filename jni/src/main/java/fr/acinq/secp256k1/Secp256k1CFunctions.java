@@ -69,6 +69,26 @@ public class Secp256k1CFunctions {
      */
     public static final int SECP256K1_FROST_SESSION_SIZE = 137;
 
+    /**
+     * Session state of a chilldkg participant after the first step (must not be interpreted).
+     */
+    public static final int SECP256K1_CHILLDKG_PARTICIPANT_STATE1_SIZE = 4306;
+
+    /**
+     * Session state of a chilldkg participant after the second step (must not be interpreted, must be kept secret).
+     */
+    public static final int SECP256K1_CHILLDKG_PARTICIPANT_STATE2_SIZE = 21073;
+
+    /**
+     * Investigation data of a chilldkg participant (must not be interpreted, must be kept secret).
+     */
+    public static final int SECP256K1_CHILLDKG_PARTICIPANT_INV_DATA_SIZE = 4205;
+
+    /**
+     * Session state of a chilldkg coordinator after the first step (must not be interpreted).
+     */
+    public static final int SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE = 21041;
+
     public static native long secp256k1_context_create(int flags);
 
     public static native void secp256k1_context_destroy(long ctx);
@@ -168,4 +188,34 @@ public class Secp256k1CFunctions {
     public static native int secp256k1_frost_partial_sig_verify(long ctx, byte[] psig, byte[] pubnonce, byte[] pubshare, byte[] session, int[] ids, int signer_index);
 
     public static native byte[] secp256k1_frost_partial_sig_agg(long ctx, byte[] session, byte[][] psigs);
+
+    public static native byte[] secp256k1_chilldkg_hostpubkey_gen(long ctx, byte[] hostseckey32);
+
+    public static native byte[] secp256k1_chilldkg_params_hash(long ctx, byte[][] hostpubkeys33, int threshold);
+
+    /* Returns the participant's first message (pmsg1); state1Out is filled with the participant's session state. */
+    public static native byte[] secp256k1_chilldkg_participant_step1(long ctx, byte[] hostseckey32, byte[][] hostpubkeys33, int threshold, byte[] random32, byte[] state1Out);
+
+    /* Fault codes are returned as int; faultIndexOut[0] receives the (suspected) faulty participant's id, or -1. */
+    public static native int secp256k1_chilldkg_coordinator_step1(long ctx, byte[][] pmsgs1, byte[][] hostpubkeys33, int threshold, byte[] stateOut, byte[] cmsg1Out, int[] faultIndexOut);
+
+    public static native int secp256k1_chilldkg_participant_step2(long ctx, byte[] hostseckey32, byte[] state1, byte[] cmsg1, byte[] aux_rand32, byte[] state2Out, byte[] sig64Out, byte[] invDataOut, int[] faultIndexOut);
+
+    public static native int secp256k1_chilldkg_coordinator_finalize(long ctx, byte[] state, byte[][] pmsgs2, int threshold, byte[] cmsg2Out, byte[] threshPk33Out, byte[] pubshares33Out, byte[] recoveryOut, int[] faultIndexOut);
+
+    public static native int secp256k1_chilldkg_participant_finalize(long ctx, byte[] state2, byte[] cmsg2, int threshold, byte[] secshare32Out, byte[] threshPk33Out, byte[] pubshares33Out, byte[] recoveryOut, int[] faultIndexOut);
+
+    /* pubshares33Out and hostpubkeys33Out must be able to hold 33 * 128 bytes each; the number of entries
+     * actually filled is written to nAndThresholdOut[0], and the threshold to nAndThresholdOut[1]. */
+    public static native int secp256k1_chilldkg_participant_recover(long ctx, byte[] hostseckey32, byte[] recovery, byte[] secshare32Out, byte[] threshPk33Out, byte[] pubshares33Out, byte[] hostpubkeys33Out, int[] nAndThresholdOut, int[] faultIndexOut);
+
+    public static native int secp256k1_chilldkg_coordinator_recover(long ctx, byte[] recovery, byte[] threshPk33Out, byte[] pubshares33Out, byte[] hostpubkeys33Out, int[] nAndThresholdOut);
+
+    public static native byte[] secp256k1_chilldkg_recovery_ack_sign(long ctx, byte[] hostseckey32, byte[][] hostpubkeys33, int threshold, byte[] recovery, byte[] aux_rand32);
+
+    public static native int secp256k1_chilldkg_recovery_acks_verify(long ctx, byte[][] hostpubkeys33, int threshold, byte[] recovery, byte[][] ackSigs64, int[] faultIndexOut);
+
+    public static native int secp256k1_chilldkg_coordinator_investigate(long ctx, byte[][] pmsgs1, byte[][] hostpubkeys33, int threshold, int participantId, byte[] cinvOut, int[] faultIndexOut);
+
+    public static native int secp256k1_chilldkg_participant_investigate(long ctx, byte[] invData, byte[] cinv, int[] faultIndexOut);
 }

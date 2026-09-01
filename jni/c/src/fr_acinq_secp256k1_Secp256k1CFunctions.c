@@ -7,6 +7,7 @@
 #endif
 #include "fr_acinq_secp256k1_Secp256k1CFunctions.h"
 #include "include/secp256k1.h"
+#include "include/secp256k1_chilldkg.h"
 #include "include/secp256k1_ecdh.h"
 #include "include/secp256k1_musig.h"
 #include "include/secp256k1_frost.h"
@@ -31,6 +32,13 @@ static const unsigned char MUSIG_SESSION_MAGIC[4] = { 0x9d, 0xed, 0xe9, 0x17 };
 static const unsigned char FROST_SECNONCE_MAGIC[4] = { 0x5c, 0xcf, 0xb9, 0x99 };
 static const unsigned char FROST_TWEAK_CACHE_MAGIC[4] = { 0x8d, 0x86, 0xb5, 0x01 };
 static const unsigned char FROST_SESSION_MAGIC[4] = { 0x34, 0xb5, 0x27, 0x3d };
+
+/* Same thing for the opaque chilldkg state objects passed back to libsecp256k1 as raw byte arrays.
+ * Keep in sync with native/secp256k1/src/modules/chilldkg/main_impl.h. */
+static const unsigned char CHILLDKG_PARTICIPANT_STATE1_MAGIC[4] = { 0x3f, 0x2c, 0x9e, 0x51 };
+static const unsigned char CHILLDKG_PARTICIPANT_STATE2_MAGIC[4] = { 0x7a, 0xd1, 0x44, 0x0b };
+static const unsigned char CHILLDKG_COORDINATOR_STATE_MAGIC[4] = { 0x1b, 0x8e, 0x63, 0xa7 };
+static const unsigned char CHILLDKG_PARTICIPANT_INV_DATA_MAGIC[4] = { 0x62, 0x4a, 0xc5, 0x90 };
 
 #define CHECKMAGIC(data, magic, message) CHECKRESULT(memcmp((data), (magic), 4) != 0, message)
 
@@ -1871,4 +1879,604 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     CHECKRESULT(!result, "secp256k1_frost_partial_sig_agg failed");
 
     return copy_bytes_to_java(penv, sig64, 64);
+}
+
+
+/* Flattens an array of 33-byte compressed host public keys into a freshly malloc'd
+ * contiguous buffer. The caller must free the buffer. */
+static inline unsigned char* get_hostpubkeys33(JNIEnv* penv, jobjectArray jhostpubkeys, size_t* count)
+{
+    unsigned char* hostpubkeys;
+    jbyteArray jhostpubkey;
+    jsize i, n;
+
+    n = (*penv)->GetArrayLength(penv, jhostpubkeys);
+    hostpubkeys = malloc(33 * (n > 0 ? (size_t)n : 1));
+    if (hostpubkeys == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        jhostpubkey = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jhostpubkeys, i);
+        if (!get_bytes(penv, jhostpubkey, 33, hostpubkeys + 33 * i, "host public key")) {
+            (*penv)->DeleteLocalRef(penv, jhostpubkey);
+            free(hostpubkeys);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jhostpubkey);
+    }
+    *count = (size_t)n;
+    return hostpubkeys;
+}
+
+/* Flattens an array of same-sized messages into a freshly malloc'd contiguous buffer, and
+ * builds the array of pointers into it that the chilldkg functions expect. On success
+ * *ptrs_out receives the pointer array and *count the number of messages; the caller frees
+ * the messages with free(ptrs[0]) (the contiguous buffer) followed by free(ptrs). */
+static inline int get_msg_ptrs(JNIEnv* penv, jobjectArray jmsgs, size_t msglen, unsigned char*** ptrs_out, size_t* count, const char* name)
+{
+    unsigned char* flat;
+    unsigned char** ptrs;
+    jbyteArray jmsg;
+    jsize i, n;
+
+    n = (*penv)->GetArrayLength(penv, jmsgs);
+    if (n < 1) {
+        JNI_ThrowSecp256k1(penv, "messages cannot be empty");
+        return 0;
+    }
+    flat = malloc(msglen * (size_t)n);
+    if (flat == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return 0;
+    }
+    ptrs = malloc(sizeof(unsigned char*) * (size_t)n);
+    if (ptrs == NULL) {
+        free(flat);
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        ptrs[i] = flat + msglen * i;
+        jmsg = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jmsgs, i);
+        if (!get_bytes(penv, jmsg, msglen, ptrs[i], name)) {
+            (*penv)->DeleteLocalRef(penv, jmsg);
+            free(ptrs);
+            free(flat);
+            return 0;
+        }
+        (*penv)->DeleteLocalRef(penv, jmsg);
+    }
+    *ptrs_out = ptrs;
+    *count = (size_t)n;
+    return 1;
+}
+
+/* Writes a chilldkg fault index to the first element of a java int array (-1 for UINT32_MAX). */
+static inline void set_fault_index(JNIEnv* penv, jintArray jfault_index, uint32_t fault_index)
+{
+    jint jindex = fault_index == UINT32_MAX ? -1 : (jint)fault_index;
+    (*penv)->SetIntArrayRegion(penv, jfault_index, 0, 1, &jindex);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_hostpubkey_gen
+ * Signature: (J[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1hostpubkey_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jhostseckey)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char hostseckey[32], hostpubkey[33];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
+
+    result = secp256k1_chilldkg_hostpubkey_gen(ctx, hostpubkey, hostseckey);
+    CHECKRESULT(!result, "secp256k1_chilldkg_hostpubkey_gen failed");
+
+    return copy_bytes_to_java(penv, hostpubkey, 33);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_params_hash
+ * Signature: (J[[BI)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1params_1hash(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jhostpubkeys, jint jthreshold)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char* hostpubkeys;
+    unsigned char hash[32];
+    size_t n = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jhostpubkeys == NULL, "host public keys cannot be null");
+    hostpubkeys = get_hostpubkeys33(penv, jhostpubkeys, &n);
+    if (hostpubkeys == NULL) return NULL;
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(hostpubkeys));
+
+    result = secp256k1_chilldkg_params_hash(ctx, hash, hostpubkeys, n, (uint32_t)jthreshold);
+    free(hostpubkeys);
+    CHECKRESULT(!result, "secp256k1_chilldkg_params_hash failed");
+
+    return copy_bytes_to_java(penv, hash, 32);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_participant_step1
+ * Signature: (J[B[[BI[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1participant_1step1(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jhostseckey, jobjectArray jhostpubkeys, jint jthreshold, jbyteArray jrandom32, jbyteArray jstate1out)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_chilldkg_participant_state1 state1;
+    unsigned char hostseckey[32], random32[32];
+    unsigned char* hostpubkeys = NULL;
+    unsigned char* pmsg1 = NULL;
+    jbyteArray jpmsg1;
+    size_t n = 0, pmsg1_len;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
+    if (!get_bytes32(penv, jrandom32, random32, "randomness")) return NULL;
+    CHECKRESULT(jhostpubkeys == NULL, "host public keys cannot be null");
+    hostpubkeys = get_hostpubkeys33(penv, jhostpubkeys, &n);
+    if (hostpubkeys == NULL) return NULL;
+    CHECKRESULT1(n < 1 || n > SECP256K1_CHILLDKG_MAX_PARTICIPANTS, "invalid number of participants", free(hostpubkeys));
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(hostpubkeys));
+    if (jstate1out == NULL || (*penv)->GetArrayLength(penv, jstate1out) != fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE1_SIZE) {
+        free(hostpubkeys);
+        JNI_ThrowSize(penv, "participant state1", fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE1_SIZE);
+        return NULL;
+    }
+
+    pmsg1_len = secp256k1_chilldkg_participant_msg1_len(n, (uint32_t)jthreshold);
+    pmsg1 = malloc(pmsg1_len);
+    CHECKRESULT1(pmsg1 == NULL, "memory allocation failed", free(hostpubkeys));
+
+    result = secp256k1_chilldkg_participant_step1(ctx, &state1, pmsg1, hostseckey, hostpubkeys, n, (uint32_t)jthreshold, random32);
+    free(hostpubkeys);
+    CHECKRESULT1(!result, "secp256k1_chilldkg_participant_step1 failed", free(pmsg1));
+
+    (*penv)->SetByteArrayRegion(penv, jstate1out, 0, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE1_SIZE, (const jbyte*)state1.data);
+    jpmsg1 = copy_bytes_to_java(penv, pmsg1, pmsg1_len);
+    free(pmsg1);
+    return jpmsg1;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_coordinator_step1
+ * Signature: (J[[B[[BI[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1coordinator_1step1(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jpmsgs1, jobjectArray jhostpubkeys, jint jthreshold, jbyteArray jstateout, jbyteArray jcmsg1out, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_chilldkg_coordinator_state state;
+    unsigned char* hostpubkeys = NULL;
+    unsigned char* cmsg1 = NULL;
+    unsigned char** pmsgs1 = NULL;
+    uint32_t fault_index = UINT32_MAX;
+    size_t n = 0, n_pmsgs = 0, pmsg1_len, cmsg1_len;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jhostpubkeys == NULL, "host public keys cannot be null");
+    hostpubkeys = get_hostpubkeys33(penv, jhostpubkeys, &n);
+    if (hostpubkeys == NULL) return 0;
+    CHECKRESULT1(n < 1 || n > SECP256K1_CHILLDKG_MAX_PARTICIPANTS, "invalid number of participants", free(hostpubkeys));
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(hostpubkeys));
+    if (jstateout == NULL || (*penv)->GetArrayLength(penv, jstateout) != fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE) {
+        free(hostpubkeys);
+        JNI_ThrowSize(penv, "coordinator state", fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE);
+        return 0;
+    }
+
+    pmsg1_len = secp256k1_chilldkg_participant_msg1_len(n, (uint32_t)jthreshold);
+    CHECKRESULT1(jpmsgs1 == NULL, "participant messages cannot be null", free(hostpubkeys));
+    if (!get_msg_ptrs(penv, jpmsgs1, pmsg1_len, &pmsgs1, &n_pmsgs, "participant message")) {
+        free(hostpubkeys);
+        return 0;
+    }
+    CHECKRESULT1(n_pmsgs != n, "participant messages count must match host public keys count", free(hostpubkeys); free(pmsgs1[0]); free(pmsgs1));
+
+    cmsg1_len = secp256k1_chilldkg_coordinator_msg1_len(n, (uint32_t)jthreshold);
+    if (jcmsg1out == NULL || (*penv)->GetArrayLength(penv, jcmsg1out) != (jsize)cmsg1_len) {
+        free(hostpubkeys);
+        free(pmsgs1[0]);
+        free(pmsgs1);
+        JNI_ThrowSize(penv, "coordinator message", (int)cmsg1_len);
+        return 0;
+    }
+    cmsg1 = malloc(cmsg1_len);
+    CHECKRESULT1(cmsg1 == NULL, "memory allocation failed", free(hostpubkeys); free(pmsgs1[0]); free(pmsgs1));
+
+    result = secp256k1_chilldkg_coordinator_step1(ctx, &state, cmsg1, &fault_index, (const unsigned char* const*)pmsgs1, hostpubkeys, n, (uint32_t)jthreshold);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    if (result == SECP256K1_CHILLDKG_OK) {
+        (*penv)->SetByteArrayRegion(penv, jstateout, 0, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE, (const jbyte*)state.data);
+        (*penv)->SetByteArrayRegion(penv, jcmsg1out, 0, (jsize)cmsg1_len, (const jbyte*)cmsg1);
+    }
+    free(hostpubkeys);
+    free(pmsgs1[0]);
+    free(pmsgs1);
+    free(cmsg1);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_participant_step2
+ * Signature: (J[B[B[B[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1participant_1step2(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jhostseckey, jbyteArray jstate1, jbyteArray jcmsg1, jbyteArray jauxrand32, jbyteArray jstate2out, jbyteArray jsig64out, jbyteArray jinvdataout, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_chilldkg_participant_state1 state1;
+    secp256k1_chilldkg_participant_state2 state2;
+    secp256k1_chilldkg_participant_inv_data inv_data;
+    unsigned char hostseckey[32], auxrand32[32];
+    unsigned char* cmsg1 = NULL;
+    unsigned char sig64[64];
+    size_t cmsg1_len = 0;
+    uint32_t fault_index = UINT32_MAX;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return 0;
+    if (!get_bytes32(penv, jauxrand32, auxrand32, "auxiliary random data")) return 0;
+    if (!get_bytes(penv, jstate1, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE1_SIZE, state1.data, "participant state1")) return 0;
+    CHECKMAGIC(state1.data, CHILLDKG_PARTICIPANT_STATE1_MAGIC, "invalid participant state1");
+    if (!get_var_bytes(penv, jcmsg1, &cmsg1, &cmsg1_len, "coordinator message")) return 0;
+    CHECKRESULT1(cmsg1 == NULL || cmsg1_len == 0, "coordinator message cannot be empty", free(cmsg1));
+
+    if (jstate2out == NULL || (*penv)->GetArrayLength(penv, jstate2out) != fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE2_SIZE) {
+        free(cmsg1);
+        JNI_ThrowSize(penv, "participant state2", fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE2_SIZE);
+        return 0;
+    }
+    if (jsig64out == NULL || (*penv)->GetArrayLength(penv, jsig64out) != 64) {
+        free(cmsg1);
+        JNI_ThrowSize(penv, "signature", 64);
+        return 0;
+    }
+    if (jinvdataout == NULL || (*penv)->GetArrayLength(penv, jinvdataout) != fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_INV_DATA_SIZE) {
+        free(cmsg1);
+        JNI_ThrowSize(penv, "investigation data", fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_INV_DATA_SIZE);
+        return 0;
+    }
+
+    result = secp256k1_chilldkg_participant_step2(ctx, &state2, sig64, &fault_index, &inv_data, &state1, hostseckey, cmsg1, auxrand32);
+    free(cmsg1);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    if (result == SECP256K1_CHILLDKG_OK) {
+        (*penv)->SetByteArrayRegion(penv, jstate2out, 0, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE2_SIZE, (const jbyte*)state2.data);
+        (*penv)->SetByteArrayRegion(penv, jsig64out, 0, 64, (const jbyte*)sig64);
+    }
+    if (result == SECP256K1_CHILLDKG_UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR) {
+        (*penv)->SetByteArrayRegion(penv, jinvdataout, 0, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_INV_DATA_SIZE, (const jbyte*)inv_data.data);
+    }
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_coordinator_finalize
+ * Signature: (J[B[[BI[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1coordinator_1finalize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jstate, jobjectArray jpmsgs2, jint jthreshold, jbyteArray jcmsg2out, jbyteArray jthreshpkout, jbyteArray jpubsharesout, jbyteArray jrecoveryout, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_chilldkg_coordinator_state state;
+    unsigned char* cmsg2 = NULL;
+    unsigned char* pubshares33 = NULL;
+    unsigned char* recovery = NULL;
+    unsigned char** pmsgs2 = NULL;
+    unsigned char thresh_pk33[33];
+    uint32_t fault_index = UINT32_MAX;
+    size_t n = 0, cmsg2_len, recovery_len;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jstate, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_COORDINATOR_STATE_SIZE, state.data, "coordinator state")) return 0;
+    CHECKMAGIC(state.data, CHILLDKG_COORDINATOR_STATE_MAGIC, "invalid coordinator state");
+
+    CHECKRESULT(jpmsgs2 == NULL, "participant messages cannot be null");
+    if (!get_msg_ptrs(penv, jpmsgs2, 64, &pmsgs2, &n, "participant message")) return 0;
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(pmsgs2[0]); free(pmsgs2));
+
+    cmsg2_len = secp256k1_chilldkg_coordinator_msg2_len(n);
+    recovery_len = secp256k1_chilldkg_recovery_data_len(n, (uint32_t)jthreshold);
+    cmsg2 = malloc(cmsg2_len);
+    pubshares33 = malloc(33 * n);
+    recovery = malloc(recovery_len);
+    CHECKRESULT1(cmsg2 == NULL || pubshares33 == NULL || recovery == NULL, "memory allocation failed", free(cmsg2); free(pubshares33); free(recovery); free(pmsgs2[0]); free(pmsgs2));
+
+    result = secp256k1_chilldkg_coordinator_finalize(ctx, cmsg2, thresh_pk33, pubshares33, recovery, &fault_index, &state, (const unsigned char* const*)pmsgs2);
+    free(pmsgs2[0]);
+    free(pmsgs2);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    if (result == SECP256K1_CHILLDKG_OK) {
+        (*penv)->SetByteArrayRegion(penv, jcmsg2out, 0, (jsize)cmsg2_len, (const jbyte*)cmsg2);
+        (*penv)->SetByteArrayRegion(penv, jthreshpkout, 0, 33, (const jbyte*)thresh_pk33);
+        (*penv)->SetByteArrayRegion(penv, jpubsharesout, 0, (jsize)(33 * n), (const jbyte*)pubshares33);
+        (*penv)->SetByteArrayRegion(penv, jrecoveryout, 0, (jsize)recovery_len, (const jbyte*)recovery);
+    }
+    free(cmsg2);
+    free(pubshares33);
+    free(recovery);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_participant_finalize
+ * Signature: (J[B[BI[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1participant_1finalize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jstate2, jbyteArray jcmsg2, jint jthreshold, jbyteArray jsecshareout, jbyteArray jthreshpkout, jbyteArray jpubsharesout, jbyteArray jrecoveryout, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_chilldkg_participant_state2 state2;
+    unsigned char* cmsg2 = NULL;
+    unsigned char* pubshares33 = NULL;
+    unsigned char* recovery = NULL;
+    unsigned char secshare32[32], thresh_pk33[33];
+    uint32_t fault_index = UINT32_MAX;
+    size_t cmsg2_len = 0, n, recovery_len;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jstate2, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE2_SIZE, state2.data, "participant state2")) return 0;
+    CHECKMAGIC(state2.data, CHILLDKG_PARTICIPANT_STATE2_MAGIC, "invalid participant state2");
+    if (!get_var_bytes(penv, jcmsg2, &cmsg2, &cmsg2_len, "certificate")) return 0;
+    CHECKRESULT1(cmsg2 == NULL || cmsg2_len == 0 || cmsg2_len % 64 != 0, "invalid certificate size", free(cmsg2));
+    n = cmsg2_len / 64;
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(cmsg2));
+
+    recovery_len = secp256k1_chilldkg_recovery_data_len(n, (uint32_t)jthreshold);
+    pubshares33 = malloc(33 * n);
+    recovery = malloc(recovery_len);
+    CHECKRESULT1(pubshares33 == NULL || recovery == NULL, "memory allocation failed", free(cmsg2); free(pubshares33); free(recovery));
+
+    result = secp256k1_chilldkg_participant_finalize(ctx, secshare32, thresh_pk33, pubshares33, recovery, &fault_index, &state2, cmsg2);
+    free(cmsg2);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    if (result == SECP256K1_CHILLDKG_OK) {
+        (*penv)->SetByteArrayRegion(penv, jsecshareout, 0, 32, (const jbyte*)secshare32);
+        (*penv)->SetByteArrayRegion(penv, jthreshpkout, 0, 33, (const jbyte*)thresh_pk33);
+        (*penv)->SetByteArrayRegion(penv, jpubsharesout, 0, (jsize)(33 * n), (const jbyte*)pubshares33);
+        (*penv)->SetByteArrayRegion(penv, jrecoveryout, 0, (jsize)recovery_len, (const jbyte*)recovery);
+    }
+    free(pubshares33);
+    free(recovery);
+    return result;
+}
+
+/* Shared implementation of participant_recover (with host secret key) and coordinator_recover
+ * (without). Output buffers must be able to hold 33 * SECP256K1_CHILLDKG_MAX_PARTICIPANTS bytes. */
+static jint chilldkg_recover(JNIEnv* penv, jlong jctx, jbyteArray jhostseckey, jbyteArray jrecovery, jbyteArray jsecshareout, jbyteArray jthreshpkout, jbyteArray jpubsharesout, jbyteArray jhostpubkeysout, jintArray jnthresholdout, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char hostseckey[32];
+    unsigned char* recovery = NULL;
+    unsigned char* pubshares33 = NULL;
+    unsigned char* hostpubkeys33 = NULL;
+    unsigned char secshare32[32], thresh_pk33[33];
+    size_t recovery_len = 0, n = 0;
+    uint32_t threshold = 0, fault_index = UINT32_MAX;
+    jint n_and_t[2];
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (jhostseckey != NULL && !get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return 0;
+    if (!get_var_bytes(penv, jrecovery, &recovery, &recovery_len, "recovery data")) return 0;
+    CHECKRESULT1(recovery == NULL || recovery_len == 0, "recovery data cannot be empty", free(recovery));
+
+    pubshares33 = malloc(33 * SECP256K1_CHILLDKG_MAX_PARTICIPANTS);
+    hostpubkeys33 = malloc(33 * SECP256K1_CHILLDKG_MAX_PARTICIPANTS);
+    CHECKRESULT1(pubshares33 == NULL || hostpubkeys33 == NULL, "memory allocation failed", free(recovery); free(pubshares33); free(hostpubkeys33));
+
+    if (jhostseckey != NULL) {
+        result = secp256k1_chilldkg_participant_recover(ctx, secshare32, thresh_pk33, pubshares33, hostpubkeys33, &n, &threshold, &fault_index, hostseckey, recovery, recovery_len);
+    } else {
+        result = secp256k1_chilldkg_coordinator_recover(ctx, thresh_pk33, pubshares33, hostpubkeys33, &n, &threshold, recovery, recovery_len);
+    }
+    free(recovery);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    if (result == SECP256K1_CHILLDKG_OK) {
+        if (jsecshareout != NULL) (*penv)->SetByteArrayRegion(penv, jsecshareout, 0, 32, (const jbyte*)secshare32);
+        (*penv)->SetByteArrayRegion(penv, jthreshpkout, 0, 33, (const jbyte*)thresh_pk33);
+        (*penv)->SetByteArrayRegion(penv, jpubsharesout, 0, (jsize)(33 * n), (const jbyte*)pubshares33);
+        (*penv)->SetByteArrayRegion(penv, jhostpubkeysout, 0, (jsize)(33 * n), (const jbyte*)hostpubkeys33);
+        n_and_t[0] = (jint)n;
+        n_and_t[1] = (jint)threshold;
+        (*penv)->SetIntArrayRegion(penv, jnthresholdout, 0, 2, n_and_t);
+    }
+    free(pubshares33);
+    free(hostpubkeys33);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_participant_recover
+ * Signature: (J[B[B[B[B[B[B[I[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1participant_1recover(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jhostseckey, jbyteArray jrecovery, jbyteArray jsecshareout, jbyteArray jthreshpkout, jbyteArray jpubsharesout, jbyteArray jhostpubkeysout, jintArray jnthresholdout, jintArray jfaultindex)
+{
+    CHECKRESULT(jctx == 0, "secp256k1 context cannot be null");
+    return chilldkg_recover(penv, jctx, jhostseckey, jrecovery, jsecshareout, jthreshpkout, jpubsharesout, jhostpubkeysout, jnthresholdout, jfaultindex);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_coordinator_recover
+ * Signature: (J[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1coordinator_1recover(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrecovery, jbyteArray jthreshpkout, jbyteArray jpubsharesout, jbyteArray jhostpubkeysout, jintArray jnthresholdout)
+{
+    CHECKRESULT(jctx == 0, "secp256k1 context cannot be null");
+    return chilldkg_recover(penv, jctx, NULL, jrecovery, NULL, jthreshpkout, jpubsharesout, jhostpubkeysout, jnthresholdout, NULL);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_recovery_ack_sign
+ * Signature: (J[B[[BI[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1recovery_1ack_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jhostseckey, jobjectArray jhostpubkeys, jint jthreshold, jbyteArray jrecovery, jbyteArray jauxrand32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char hostseckey[32], auxrand32[32], sig64[64];
+    unsigned char* hostpubkeys = NULL;
+    unsigned char* recovery = NULL;
+    size_t n = 0, recovery_len = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
+    if (!get_bytes32(penv, jauxrand32, auxrand32, "auxiliary random data")) return NULL;
+    CHECKRESULT(jhostpubkeys == NULL, "host public keys cannot be null");
+    hostpubkeys = get_hostpubkeys33(penv, jhostpubkeys, &n);
+    if (hostpubkeys == NULL) return NULL;
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(hostpubkeys));
+    if (!get_var_bytes(penv, jrecovery, &recovery, &recovery_len, "recovery data")) {
+        free(hostpubkeys);
+        return NULL;
+    }
+    CHECKRESULT1(recovery == NULL || recovery_len == 0, "recovery data cannot be empty", free(hostpubkeys); free(recovery));
+
+    result = secp256k1_chilldkg_recovery_ack_sign(ctx, sig64, hostseckey, hostpubkeys, n, (uint32_t)jthreshold, recovery, recovery_len, auxrand32);
+    free(hostpubkeys);
+    free(recovery);
+    CHECKRESULT(!result, "secp256k1_chilldkg_recovery_ack_sign failed");
+
+    return copy_bytes_to_java(penv, sig64, 64);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_recovery_acks_verify
+ * Signature: (J[[BI[B[[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1recovery_1acks_1verify(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jhostpubkeys, jint jthreshold, jbyteArray jrecovery, jobjectArray jacksigs, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char* hostpubkeys = NULL;
+    unsigned char* recovery = NULL;
+    unsigned char** acks = NULL;
+    size_t n = 0, n_acks = 0, recovery_len = 0;
+    uint32_t fault_index = UINT32_MAX;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jhostpubkeys == NULL, "host public keys cannot be null");
+    hostpubkeys = get_hostpubkeys33(penv, jhostpubkeys, &n);
+    if (hostpubkeys == NULL) return 0;
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(hostpubkeys));
+    if (!get_var_bytes(penv, jrecovery, &recovery, &recovery_len, "recovery data")) {
+        free(hostpubkeys);
+        return 0;
+    }
+    CHECKRESULT1(recovery == NULL || recovery_len == 0, "recovery data cannot be empty", free(hostpubkeys); free(recovery));
+    CHECKRESULT1(jacksigs == NULL, "acknowledgment signatures cannot be null", free(hostpubkeys); free(recovery));
+    if (!get_msg_ptrs(penv, jacksigs, 64, &acks, &n_acks, "acknowledgment signature")) {
+        free(hostpubkeys);
+        free(recovery);
+        return 0;
+    }
+    CHECKRESULT1(n_acks != n, "acknowledgment signatures count must match host public keys count", free(hostpubkeys); free(recovery); free(acks[0]); free(acks));
+
+    result = secp256k1_chilldkg_recovery_acks_verify(ctx, &fault_index, hostpubkeys, n, (uint32_t)jthreshold, recovery, recovery_len, (const unsigned char* const*)acks);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    free(hostpubkeys);
+    free(recovery);
+    free(acks[0]);
+    free(acks);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_coordinator_investigate
+ * Signature: (J[[B[[BII[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1coordinator_1investigate(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jpmsgs1, jobjectArray jhostpubkeys, jint jthreshold, jint jparticipantid, jbyteArray jcinvout, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char* hostpubkeys = NULL;
+    unsigned char* cinv = NULL;
+    unsigned char** pmsgs1 = NULL;
+    uint32_t fault_index = UINT32_MAX;
+    size_t n = 0, n_pmsgs = 0, pmsg1_len, cinv_len;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jhostpubkeys == NULL, "host public keys cannot be null");
+    hostpubkeys = get_hostpubkeys33(penv, jhostpubkeys, &n);
+    if (hostpubkeys == NULL) return 0;
+    CHECKRESULT1(n < 1 || n > SECP256K1_CHILLDKG_MAX_PARTICIPANTS, "invalid number of participants", free(hostpubkeys));
+    CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(hostpubkeys));
+    CHECKRESULT1(jparticipantid < 0 || (size_t)jparticipantid >= n, "invalid participant id", free(hostpubkeys));
+
+    pmsg1_len = secp256k1_chilldkg_participant_msg1_len(n, (uint32_t)jthreshold);
+    CHECKRESULT1(jpmsgs1 == NULL, "participant messages cannot be null", free(hostpubkeys));
+    if (!get_msg_ptrs(penv, jpmsgs1, pmsg1_len, &pmsgs1, &n_pmsgs, "participant message")) {
+        free(hostpubkeys);
+        return 0;
+    }
+    CHECKRESULT1(n_pmsgs != n, "participant messages count must match host public keys count", free(hostpubkeys); free(pmsgs1[0]); free(pmsgs1));
+
+    cinv_len = secp256k1_chilldkg_investigation_msg_len(n);
+    if (jcinvout == NULL || (*penv)->GetArrayLength(penv, jcinvout) != (jsize)cinv_len) {
+        free(hostpubkeys);
+        free(pmsgs1[0]);
+        free(pmsgs1);
+        JNI_ThrowSize(penv, "investigation message", (int)cinv_len);
+        return 0;
+    }
+    cinv = malloc(cinv_len);
+    CHECKRESULT1(cinv == NULL, "memory allocation failed", free(hostpubkeys); free(pmsgs1[0]); free(pmsgs1));
+
+    result = secp256k1_chilldkg_coordinator_investigate(ctx, cinv, &fault_index, (const unsigned char* const*)pmsgs1, hostpubkeys, n, (uint32_t)jthreshold, (uint32_t)jparticipantid);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    if (result == SECP256K1_CHILLDKG_OK) {
+        (*penv)->SetByteArrayRegion(penv, jcinvout, 0, (jsize)cinv_len, (const jbyte*)cinv);
+    }
+    free(hostpubkeys);
+    free(pmsgs1[0]);
+    free(pmsgs1);
+    free(cinv);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_chilldkg_participant_investigate
+ * Signature: (J[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1chilldkg_1participant_1investigate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jinvdata, jbyteArray jcinv, jintArray jfaultindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_chilldkg_participant_inv_data inv_data;
+    unsigned char* cinv = NULL;
+    size_t cinv_len = 0;
+    uint32_t fault_index = UINT32_MAX;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jinvdata, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_INV_DATA_SIZE, inv_data.data, "investigation data")) return 0;
+    CHECKMAGIC(inv_data.data, CHILLDKG_PARTICIPANT_INV_DATA_MAGIC, "invalid investigation data");
+    if (!get_var_bytes(penv, jcinv, &cinv, &cinv_len, "investigation message")) return 0;
+    CHECKRESULT1(cinv == NULL || cinv_len == 0, "investigation message cannot be empty", free(cinv));
+
+    result = secp256k1_chilldkg_participant_investigate(ctx, &fault_index, &inv_data, cinv);
+    free(cinv);
+    if (jfaultindex != NULL) set_fault_index(penv, jfaultindex, fault_index);
+    return result;
 }

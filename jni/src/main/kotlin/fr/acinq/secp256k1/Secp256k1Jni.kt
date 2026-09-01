@@ -341,4 +341,149 @@ public object Secp256k1Jni : Secp256k1 {
         psigs.forEach { require(it.size == 32) { "partial signature must be 32 bytes" } }
         return Secp256k1CFunctions.secp256k1_frost_partial_sig_agg(Secp256k1Context.getContext(), session, psigs)
     }
+
+    private fun chilldkgFault(code: Int, faultIndex: IntArray): ChilldkgFault = ChilldkgFault(code, faultIndex[0].let { if (it == -1) null else it.toUInt() })
+
+    override fun chilldkgHostpubkeyGen(hostseckey32: ByteArray): ByteArray {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_chilldkg_hostpubkey_gen(Secp256k1Context.getContext(), hostseckey32)
+    }
+
+    override fun chilldkgParamsHash(hostpubkeys33: Array<ByteArray>, threshold: Int): ByteArray {
+        require(hostpubkeys33.isNotEmpty()) { "host public keys must not be empty" }
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        require(threshold in 1..hostpubkeys33.size) { "invalid threshold" }
+        return Secp256k1CFunctions.secp256k1_chilldkg_params_hash(Secp256k1Context.getContext(), hostpubkeys33, threshold)
+    }
+
+    override fun chilldkgParticipantStep1(hostseckey32: ByteArray, hostpubkeys33: Array<ByteArray>, threshold: Int, random32: ByteArray): Pair<ByteArray, ByteArray> {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(random32.size == 32) { "randomness must be 32 bytes" }
+        require(hostpubkeys33.isNotEmpty()) { "host public keys must not be empty" }
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        require(threshold in 1..hostpubkeys33.size) { "invalid threshold" }
+        val state1 = ByteArray(Secp256k1.CHILLDKG_PARTICIPANT_STATE1_SIZE)
+        val pmsg1 = Secp256k1CFunctions.secp256k1_chilldkg_participant_step1(Secp256k1Context.getContext(), hostseckey32, hostpubkeys33, threshold, random32, state1)
+        return Pair(state1, pmsg1)
+    }
+
+    override fun chilldkgCoordinatorStep1(pmsgs1: Array<ByteArray>, hostpubkeys33: Array<ByteArray>, threshold: Int): ChilldkgCoordinatorStep1Result {
+        require(pmsgs1.isNotEmpty()) { "participant messages must not be empty" }
+        require(pmsgs1.size == hostpubkeys33.size) { "participant messages count must match host public keys count" }
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        require(threshold in 1..hostpubkeys33.size) { "invalid threshold" }
+        val state = ByteArray(Secp256k1.CHILLDKG_COORDINATOR_STATE_SIZE)
+        val cmsg1 = ByteArray(162 * hostpubkeys33.size + 33 * (threshold - 1))
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_chilldkg_coordinator_step1(Secp256k1Context.getContext(), pmsgs1, hostpubkeys33, threshold, state, cmsg1, faultIndex)
+        return ChilldkgCoordinatorStep1Result(chilldkgFault(fault, faultIndex), state, cmsg1)
+    }
+
+    override fun chilldkgParticipantStep2(hostseckey32: ByteArray, state1: ByteArray, cmsg1: ByteArray, auxRand32: ByteArray): ChilldkgParticipantStep2Result {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(state1.size == Secp256k1.CHILLDKG_PARTICIPANT_STATE1_SIZE) { "invalid participant state1 size" }
+        require(cmsg1.isNotEmpty()) { "coordinator message must not be empty" }
+        require(auxRand32.size == 32) { "auxiliary random data must be 32 bytes" }
+        val state2 = ByteArray(Secp256k1.CHILLDKG_PARTICIPANT_STATE2_SIZE)
+        val sig64 = ByteArray(64)
+        val invData = ByteArray(Secp256k1.CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_chilldkg_participant_step2(Secp256k1Context.getContext(), hostseckey32, state1, cmsg1, auxRand32, state2, sig64, invData, faultIndex)
+        return ChilldkgParticipantStep2Result(chilldkgFault(fault, faultIndex), state2, sig64, if (fault == ChilldkgFault.UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR) invData else null)
+    }
+
+    override fun chilldkgCoordinatorFinalize(state: ByteArray, pmsgs2: Array<ByteArray>, threshold: Int): ChilldkgCoordinatorFinalizeResult {
+        require(state.size == Secp256k1.CHILLDKG_COORDINATOR_STATE_SIZE) { "invalid coordinator state size" }
+        require(pmsgs2.isNotEmpty()) { "participant messages must not be empty" }
+        pmsgs2.forEach { require(it.size == 64) { "participant message must be 64 bytes" } }
+        require(threshold in 1..pmsgs2.size) { "invalid threshold" }
+        val n = pmsgs2.size
+        val cmsg2 = ByteArray(64 * n)
+        val thresholdPubkey = ByteArray(33)
+        val pubshares = ByteArray(33 * n)
+        val recovery = ByteArray(4 + 33 * threshold + 162 * n)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_chilldkg_coordinator_finalize(Secp256k1Context.getContext(), state, pmsgs2, threshold, cmsg2, thresholdPubkey, pubshares, recovery, faultIndex)
+        return ChilldkgCoordinatorFinalizeResult(chilldkgFault(fault, faultIndex), cmsg2, thresholdPubkey, pubshares.toList().chunked(33) { it.toByteArray() }.toTypedArray(), recovery)
+    }
+
+    override fun chilldkgParticipantFinalize(state2: ByteArray, cmsg2: ByteArray, nParticipants: Int, threshold: Int): ChilldkgParticipantFinalizeResult {
+        require(state2.size == Secp256k1.CHILLDKG_PARTICIPANT_STATE2_SIZE) { "invalid participant state2 size" }
+        require(nParticipants in 1..Secp256k1.CHILLDKG_MAX_PARTICIPANTS) { "invalid number of participants" }
+        require(threshold in 1..nParticipants) { "invalid threshold" }
+        require(cmsg2.size == 64 * nParticipants) { "invalid certificate size" }
+        val secshare = ByteArray(32)
+        val thresholdPubkey = ByteArray(33)
+        val pubshares = ByteArray(33 * nParticipants)
+        val recovery = ByteArray(4 + 33 * threshold + 162 * nParticipants)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_chilldkg_participant_finalize(Secp256k1Context.getContext(), state2, cmsg2, threshold, secshare, thresholdPubkey, pubshares, recovery, faultIndex)
+        return ChilldkgParticipantFinalizeResult(chilldkgFault(fault, faultIndex), secshare, thresholdPubkey, pubshares.toList().chunked(33) { it.toByteArray() }.toTypedArray(), recovery)
+    }
+
+    private fun chilldkgRecover(hostseckey32: ByteArray?, recovery: ByteArray): ChilldkgRecoverResult {
+        hostseckey32?.let { require(it.size == 32) { "host secret key must be 32 bytes" } }
+        require(recovery.isNotEmpty()) { "recovery data must not be empty" }
+        val secshare = ByteArray(32)
+        val thresholdPubkey = ByteArray(33)
+        val pubshares = ByteArray(33 * Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        val hostpubkeys = ByteArray(33 * Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        val nAndThreshold = IntArray(2)
+        val faultIndex = IntArray(1) { -1 }
+        val fault = if (hostseckey32 != null) {
+            Secp256k1CFunctions.secp256k1_chilldkg_participant_recover(Secp256k1Context.getContext(), hostseckey32, recovery, secshare, thresholdPubkey, pubshares, hostpubkeys, nAndThreshold, faultIndex)
+        } else {
+            Secp256k1CFunctions.secp256k1_chilldkg_coordinator_recover(Secp256k1Context.getContext(), recovery, thresholdPubkey, pubshares, hostpubkeys, nAndThreshold)
+        }
+        val n = nAndThreshold[0].coerceIn(0, Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        val pubshareList = pubshares.copyOf(33 * n).toList().chunked(33) { it.toByteArray() }.toTypedArray()
+        val hostpubkeyList = hostpubkeys.copyOf(33 * n).toList().chunked(33) { it.toByteArray() }.toTypedArray()
+        return ChilldkgRecoverResult(chilldkgFault(fault, faultIndex), hostseckey32?.let { secshare }, thresholdPubkey, pubshareList, hostpubkeyList, n, nAndThreshold[1])
+    }
+
+    override fun chilldkgParticipantRecover(hostseckey32: ByteArray, recovery: ByteArray): ChilldkgRecoverResult = chilldkgRecover(hostseckey32, recovery)
+
+    override fun chilldkgCoordinatorRecover(recovery: ByteArray): ChilldkgRecoverResult = chilldkgRecover(null, recovery)
+
+    override fun chilldkgRecoveryAckSign(hostseckey32: ByteArray, hostpubkeys33: Array<ByteArray>, threshold: Int, recovery: ByteArray, auxRand32: ByteArray): ByteArray {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(auxRand32.size == 32) { "auxiliary random data must be 32 bytes" }
+        require(hostpubkeys33.isNotEmpty()) { "host public keys must not be empty" }
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        require(threshold in 1..hostpubkeys33.size) { "invalid threshold" }
+        require(recovery.isNotEmpty()) { "recovery data must not be empty" }
+        return Secp256k1CFunctions.secp256k1_chilldkg_recovery_ack_sign(Secp256k1Context.getContext(), hostseckey32, hostpubkeys33, threshold, recovery, auxRand32)
+    }
+
+    override fun chilldkgRecoveryAcksVerify(hostpubkeys33: Array<ByteArray>, threshold: Int, recovery: ByteArray, ackSigs64: Array<ByteArray>): ChilldkgFault {
+        require(hostpubkeys33.isNotEmpty()) { "host public keys must not be empty" }
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        require(threshold in 1..hostpubkeys33.size) { "invalid threshold" }
+        require(recovery.isNotEmpty()) { "recovery data must not be empty" }
+        require(ackSigs64.size == hostpubkeys33.size) { "acknowledgment signatures count must match host public keys count" }
+        ackSigs64.forEach { require(it.size == 64) { "acknowledgment signature must be 64 bytes" } }
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_chilldkg_recovery_acks_verify(Secp256k1Context.getContext(), hostpubkeys33, threshold, recovery, ackSigs64, faultIndex)
+        return chilldkgFault(fault, faultIndex)
+    }
+
+    override fun chilldkgCoordinatorInvestigate(pmsgs1: Array<ByteArray>, hostpubkeys33: Array<ByteArray>, threshold: Int, participantId: UInt): Pair<ChilldkgFault, ByteArray> {
+        require(pmsgs1.isNotEmpty()) { "participant messages must not be empty" }
+        require(pmsgs1.size == hostpubkeys33.size) { "participant messages count must match host public keys count" }
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        require(threshold in 1..hostpubkeys33.size) { "invalid threshold" }
+        require(participantId < hostpubkeys33.size.toUInt()) { "invalid participant id" }
+        val cinv = ByteArray(65 * hostpubkeys33.size)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_chilldkg_coordinator_investigate(Secp256k1Context.getContext(), pmsgs1, hostpubkeys33, threshold, participantId.toInt(), cinv, faultIndex)
+        return Pair(chilldkgFault(fault, faultIndex), cinv)
+    }
+
+    override fun chilldkgParticipantInvestigate(investigationData: ByteArray, cinv: ByteArray): ChilldkgFault {
+        require(investigationData.size == Secp256k1.CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE) { "invalid investigation data size" }
+        require(cinv.isNotEmpty()) { "investigation message must not be empty" }
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_chilldkg_participant_investigate(Secp256k1Context.getContext(), investigationData, cinv, faultIndex)
+        return chilldkgFault(fault, faultIndex)
+    }
 }

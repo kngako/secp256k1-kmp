@@ -841,6 +841,236 @@ public object Secp256k1Native : Secp256k1 {
             return sig64
         }
     }
+
+    private fun MemScope.flatHostpubkeys33(hostpubkeys33: Array<ByteArray>): CPointer<UByteVar> {
+        require(hostpubkeys33.isNotEmpty())
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        val flat = ByteArray(33 * hostpubkeys33.size)
+        hostpubkeys33.forEachIndexed { i, pk -> pk.copyInto(flat, 33 * i) }
+        return toNat(flat)
+    }
+
+    private fun chilldkgFault(code: Int, faultIndex: UInt): ChilldkgFault =
+        ChilldkgFault(code, if (faultIndex == UInt.MAX_VALUE) null else faultIndex)
+
+    private fun MemScope.allocChilldkgState1(state1: ByteArray): secp256k1_chilldkg_participant_state1 {
+        state1.checkMagic(Secp256k1.CHILLDKG_PARTICIPANT_STATE1_MAGIC, "participant state1")
+        val nState = alloc<secp256k1_chilldkg_participant_state1>()
+        memcpy(nState.ptr, toNat(state1), Secp256k1.CHILLDKG_PARTICIPANT_STATE1_SIZE.toULong())
+        return nState
+    }
+
+    private fun MemScope.allocChilldkgState2(state2: ByteArray): secp256k1_chilldkg_participant_state2 {
+        state2.checkMagic(Secp256k1.CHILLDKG_PARTICIPANT_STATE2_MAGIC, "participant state2")
+        val nState = alloc<secp256k1_chilldkg_participant_state2>()
+        memcpy(nState.ptr, toNat(state2), Secp256k1.CHILLDKG_PARTICIPANT_STATE2_SIZE.toULong())
+        return nState
+    }
+
+    private fun MemScope.allocChilldkgCoordinatorState(state: ByteArray): secp256k1_chilldkg_coordinator_state {
+        state.checkMagic(Secp256k1.CHILLDKG_COORDINATOR_STATE_MAGIC, "coordinator state")
+        val nState = alloc<secp256k1_chilldkg_coordinator_state>()
+        memcpy(nState.ptr, toNat(state), Secp256k1.CHILLDKG_COORDINATOR_STATE_SIZE.toULong())
+        return nState
+    }
+
+    private fun MemScope.allocChilldkgInvData(invData: ByteArray): secp256k1_chilldkg_participant_inv_data {
+        invData.checkMagic(Secp256k1.CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_MAGIC, "investigation data")
+        val nInvData = alloc<secp256k1_chilldkg_participant_inv_data>()
+        memcpy(nInvData.ptr, toNat(invData), Secp256k1.CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE.toULong())
+        return nInvData
+    }
+
+    override fun chilldkgHostpubkeyGen(hostseckey32: ByteArray): ByteArray {
+        require(hostseckey32.size == 32)
+        memScoped {
+            val nHostpubkey = allocArray<UByteVar>(33)
+            secp256k1_chilldkg_hostpubkey_gen(ctx, nHostpubkey, toNat(hostseckey32)).requireSuccess("secp256k1_chilldkg_hostpubkey_gen() failed")
+            return nHostpubkey.readBytes(33)
+        }
+    }
+
+    override fun chilldkgParamsHash(hostpubkeys33: Array<ByteArray>, threshold: Int): ByteArray {
+        require(threshold in 1..hostpubkeys33.size)
+        memScoped {
+            val nHostpubkeys = flatHostpubkeys33(hostpubkeys33)
+            val nHash = allocArray<UByteVar>(32)
+            secp256k1_chilldkg_params_hash(ctx, nHash, nHostpubkeys, hostpubkeys33.size.convert(), threshold.toUInt()).requireSuccess("secp256k1_chilldkg_params_hash() failed")
+            return nHash.readBytes(32)
+        }
+    }
+
+    override fun chilldkgParticipantStep1(hostseckey32: ByteArray, hostpubkeys33: Array<ByteArray>, threshold: Int, random32: ByteArray): Pair<ByteArray, ByteArray> {
+        require(hostseckey32.size == 32)
+        require(random32.size == 32)
+        require(threshold in 1..hostpubkeys33.size)
+        require(hostpubkeys33.size <= Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        memScoped {
+            val nHostpubkeys = flatHostpubkeys33(hostpubkeys33)
+            val pmsg1Len = secp256k1_chilldkg_participant_msg1_len(hostpubkeys33.size.convert(), threshold.toUInt()).toInt()
+            val nState1 = alloc<secp256k1_chilldkg_participant_state1>()
+            val nPmsg1 = allocArray<UByteVar>(pmsg1Len)
+            secp256k1_chilldkg_participant_step1(ctx, nState1.ptr, nPmsg1, toNat(hostseckey32), nHostpubkeys, hostpubkeys33.size.convert(), threshold.toUInt(), toNat(random32)).requireSuccess("secp256k1_chilldkg_participant_step1() failed")
+            return Pair(nState1.ptr.readBytes(Secp256k1.CHILLDKG_PARTICIPANT_STATE1_SIZE), nPmsg1.readBytes(pmsg1Len))
+        }
+    }
+
+    override fun chilldkgCoordinatorStep1(pmsgs1: Array<ByteArray>, hostpubkeys33: Array<ByteArray>, threshold: Int): ChilldkgCoordinatorStep1Result {
+        require(pmsgs1.isNotEmpty())
+        require(pmsgs1.size == hostpubkeys33.size) { "participant messages count must match host public keys count" }
+        require(threshold in 1..hostpubkeys33.size)
+        require(hostpubkeys33.size <= Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        memScoped {
+            val nHostpubkeys = flatHostpubkeys33(hostpubkeys33)
+            val nPmsgs1 = pmsgs1.map { toNat(it) }.toCValues()
+            val cmsg1Len = secp256k1_chilldkg_coordinator_msg1_len(hostpubkeys33.size.convert(), threshold.toUInt()).toInt()
+            val nState = alloc<secp256k1_chilldkg_coordinator_state>()
+            val nCmsg1 = allocArray<UByteVar>(cmsg1Len)
+            val nFaultIndex = alloc<UIntVar>()
+            val fault = secp256k1_chilldkg_coordinator_step1(ctx, nState.ptr, nCmsg1, nFaultIndex.ptr, nPmsgs1, nHostpubkeys, hostpubkeys33.size.convert(), threshold.toUInt()).toInt()
+            return ChilldkgCoordinatorStep1Result(chilldkgFault(fault, nFaultIndex.value), nState.ptr.readBytes(Secp256k1.CHILLDKG_COORDINATOR_STATE_SIZE), nCmsg1.readBytes(cmsg1Len))
+        }
+    }
+
+    override fun chilldkgParticipantStep2(hostseckey32: ByteArray, state1: ByteArray, cmsg1: ByteArray, auxRand32: ByteArray): ChilldkgParticipantStep2Result {
+        require(hostseckey32.size == 32)
+        require(state1.size == Secp256k1.CHILLDKG_PARTICIPANT_STATE1_SIZE)
+        require(auxRand32.size == 32)
+        memScoped {
+            val nState1 = allocChilldkgState1(state1)
+            val nState2 = alloc<secp256k1_chilldkg_participant_state2>()
+            val nSig64 = allocArray<UByteVar>(64)
+            val nFaultIndex = alloc<UIntVar>()
+            val nInvData = alloc<secp256k1_chilldkg_participant_inv_data>()
+            val fault = secp256k1_chilldkg_participant_step2(ctx, nState2.ptr, nSig64, nFaultIndex.ptr, nInvData.ptr, nState1.ptr, toNat(hostseckey32), toNat(cmsg1), toNat(auxRand32)).toInt()
+            val invData = if (fault == ChilldkgFault.UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR) nInvData.ptr.readBytes(Secp256k1.CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE) else null
+            return ChilldkgParticipantStep2Result(chilldkgFault(fault, nFaultIndex.value), nState2.ptr.readBytes(Secp256k1.CHILLDKG_PARTICIPANT_STATE2_SIZE), nSig64.readBytes(64), invData)
+        }
+    }
+
+    override fun chilldkgCoordinatorFinalize(state: ByteArray, pmsgs2: Array<ByteArray>, threshold: Int): ChilldkgCoordinatorFinalizeResult {
+        require(state.size == Secp256k1.CHILLDKG_COORDINATOR_STATE_SIZE)
+        require(pmsgs2.isNotEmpty())
+        pmsgs2.forEach { require(it.size == 64) { "participant message must be 64 bytes" } }
+        require(threshold in 1..pmsgs2.size)
+        memScoped {
+            val nState = allocChilldkgCoordinatorState(state)
+            val nPmsgs2 = pmsgs2.map { toNat(it) }.toCValues()
+            val n = pmsgs2.size
+            val cmsg2Len = secp256k1_chilldkg_coordinator_msg2_len(n.convert()).toInt()
+            val recoveryLen = secp256k1_chilldkg_recovery_data_len(n.convert(), threshold.toUInt()).toInt()
+            val nCmsg2 = allocArray<UByteVar>(cmsg2Len)
+            val nThreshPk = allocArray<UByteVar>(33)
+            val nPubshares = allocArray<UByteVar>(33 * n)
+            val nRecovery = allocArray<UByteVar>(recoveryLen)
+            val nFaultIndex = alloc<UIntVar>()
+            val fault = secp256k1_chilldkg_coordinator_finalize(ctx, nCmsg2, nThreshPk, nPubshares, nRecovery, nFaultIndex.ptr, nState.ptr, nPmsgs2).toInt()
+            val pubshares = nPubshares.readBytes(33 * n).toList().chunked(33) { it.toByteArray() }.toTypedArray()
+            return ChilldkgCoordinatorFinalizeResult(chilldkgFault(fault, nFaultIndex.value), nCmsg2.readBytes(cmsg2Len), nThreshPk.readBytes(33), pubshares, nRecovery.readBytes(recoveryLen))
+        }
+    }
+
+    override fun chilldkgParticipantFinalize(state2: ByteArray, cmsg2: ByteArray, nParticipants: Int, threshold: Int): ChilldkgParticipantFinalizeResult {
+        require(state2.size == Secp256k1.CHILLDKG_PARTICIPANT_STATE2_SIZE)
+        require(nParticipants in 1..Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        require(threshold in 1..nParticipants)
+        require(cmsg2.size == 64 * nParticipants) { "invalid certificate size" }
+        memScoped {
+            val nState2 = allocChilldkgState2(state2)
+            val recoveryLen = secp256k1_chilldkg_recovery_data_len(nParticipants.convert(), threshold.toUInt()).toInt()
+            val nSecshare = allocArray<UByteVar>(32)
+            val nThreshPk = allocArray<UByteVar>(33)
+            val nPubshares = allocArray<UByteVar>(33 * nParticipants)
+            val nRecovery = allocArray<UByteVar>(recoveryLen)
+            val nFaultIndex = alloc<UIntVar>()
+            val fault = secp256k1_chilldkg_participant_finalize(ctx, nSecshare, nThreshPk, nPubshares, nRecovery, nFaultIndex.ptr, nState2.ptr, toNat(cmsg2)).toInt()
+            val pubshares = nPubshares.readBytes(33 * nParticipants).toList().chunked(33) { it.toByteArray() }.toTypedArray()
+            return ChilldkgParticipantFinalizeResult(chilldkgFault(fault, nFaultIndex.value), nSecshare.readBytes(32), nThreshPk.readBytes(33), pubshares, nRecovery.readBytes(recoveryLen))
+        }
+    }
+
+    private fun chilldkgRecover(hostseckey32: ByteArray?, recovery: ByteArray): ChilldkgRecoverResult {
+        hostseckey32?.let { require(it.size == 32) }
+        require(recovery.isNotEmpty())
+        memScoped {
+            val nSecshare = allocArray<UByteVar>(32)
+            val nThreshPk = allocArray<UByteVar>(33)
+            val nPubshares = allocArray<UByteVar>(33 * Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+            val nHostpubkeys = allocArray<UByteVar>(33 * Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+            val nParticipants = alloc<size_tVar>()
+            val nThreshold = alloc<UIntVar>()
+            val nFaultIndex = alloc<UIntVar>()
+            nFaultIndex.value = UInt.MAX_VALUE
+            val fault = if (hostseckey32 != null) {
+                secp256k1_chilldkg_participant_recover(ctx, nSecshare, nThreshPk, nPubshares, nHostpubkeys, nParticipants.ptr, nThreshold.ptr, nFaultIndex.ptr, toNat(hostseckey32), toNat(recovery), recovery.size.convert()).toInt()
+            } else {
+                secp256k1_chilldkg_coordinator_recover(ctx, nThreshPk, nPubshares, nHostpubkeys, nParticipants.ptr, nThreshold.ptr, toNat(recovery), recovery.size.convert()).toInt()
+            }
+            val n = nParticipants.value.toInt().coerceAtMost(Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+            val pubshares = nPubshares.readBytes(33 * n).toList().chunked(33) { it.toByteArray() }.toTypedArray()
+            val hostpubkeys = nHostpubkeys.readBytes(33 * n).toList().chunked(33) { it.toByteArray() }.toTypedArray()
+            return ChilldkgRecoverResult(chilldkgFault(fault, nFaultIndex.value), hostseckey32?.let { nSecshare.readBytes(32) }, nThreshPk.readBytes(33), pubshares, hostpubkeys, n, nThreshold.value.toInt())
+        }
+    }
+
+    override fun chilldkgParticipantRecover(hostseckey32: ByteArray, recovery: ByteArray): ChilldkgRecoverResult = chilldkgRecover(hostseckey32, recovery)
+
+    override fun chilldkgCoordinatorRecover(recovery: ByteArray): ChilldkgRecoverResult = chilldkgRecover(null, recovery)
+
+    override fun chilldkgRecoveryAckSign(hostseckey32: ByteArray, hostpubkeys33: Array<ByteArray>, threshold: Int, recovery: ByteArray, auxRand32: ByteArray): ByteArray {
+        require(hostseckey32.size == 32)
+        require(auxRand32.size == 32)
+        require(threshold in 1..hostpubkeys33.size)
+        require(recovery.isNotEmpty())
+        memScoped {
+            val nHostpubkeys = flatHostpubkeys33(hostpubkeys33)
+            val nSig64 = allocArray<UByteVar>(64)
+            secp256k1_chilldkg_recovery_ack_sign(ctx, nSig64, toNat(hostseckey32), nHostpubkeys, hostpubkeys33.size.convert(), threshold.toUInt(), toNat(recovery), recovery.size.convert(), toNat(auxRand32)).requireSuccess("secp256k1_chilldkg_recovery_ack_sign() failed")
+            return nSig64.readBytes(64)
+        }
+    }
+
+    override fun chilldkgRecoveryAcksVerify(hostpubkeys33: Array<ByteArray>, threshold: Int, recovery: ByteArray, ackSigs64: Array<ByteArray>): ChilldkgFault {
+        require(threshold in 1..hostpubkeys33.size)
+        require(recovery.isNotEmpty())
+        require(ackSigs64.size == hostpubkeys33.size) { "acknowledgment signatures count must match host public keys count" }
+        ackSigs64.forEach { require(it.size == 64) { "acknowledgment signature must be 64 bytes" } }
+        memScoped {
+            val nHostpubkeys = flatHostpubkeys33(hostpubkeys33)
+            val nAcks = ackSigs64.map { toNat(it) }.toCValues()
+            val nFaultIndex = alloc<UIntVar>()
+            val fault = secp256k1_chilldkg_recovery_acks_verify(ctx, nFaultIndex.ptr, nHostpubkeys, hostpubkeys33.size.convert(), threshold.toUInt(), toNat(recovery), recovery.size.convert(), nAcks).toInt()
+            return chilldkgFault(fault, nFaultIndex.value)
+        }
+    }
+
+    override fun chilldkgCoordinatorInvestigate(pmsgs1: Array<ByteArray>, hostpubkeys33: Array<ByteArray>, threshold: Int, participantId: UInt): Pair<ChilldkgFault, ByteArray> {
+        require(pmsgs1.isNotEmpty())
+        require(pmsgs1.size == hostpubkeys33.size) { "participant messages count must match host public keys count" }
+        require(threshold in 1..hostpubkeys33.size)
+        require(hostpubkeys33.size <= Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        require(participantId < hostpubkeys33.size.toUInt())
+        memScoped {
+            val nHostpubkeys = flatHostpubkeys33(hostpubkeys33)
+            val nPmsgs1 = pmsgs1.map { toNat(it) }.toCValues()
+            val cinvLen = secp256k1_chilldkg_investigation_msg_len(hostpubkeys33.size.convert()).toInt()
+            val nCinv = allocArray<UByteVar>(cinvLen)
+            val nFaultIndex = alloc<UIntVar>()
+            val fault = secp256k1_chilldkg_coordinator_investigate(ctx, nCinv, nFaultIndex.ptr, nPmsgs1, nHostpubkeys, hostpubkeys33.size.convert(), threshold.toUInt(), participantId).toInt()
+            return Pair(chilldkgFault(fault, nFaultIndex.value), nCinv.readBytes(cinvLen))
+        }
+    }
+
+    override fun chilldkgParticipantInvestigate(investigationData: ByteArray, cinv: ByteArray): ChilldkgFault {
+        require(investigationData.size == Secp256k1.CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE)
+        require(cinv.isNotEmpty())
+        memScoped {
+            val nInvData = allocChilldkgInvData(investigationData)
+            val nFaultIndex = alloc<UIntVar>()
+            val fault = secp256k1_chilldkg_participant_investigate(ctx, nFaultIndex.ptr, nInvData.ptr, toNat(cinv)).toInt()
+            return chilldkgFault(fault, nFaultIndex.value)
+        }
+    }
 }
 
 internal actual fun getSecpk256k1(): Secp256k1 = Secp256k1Native

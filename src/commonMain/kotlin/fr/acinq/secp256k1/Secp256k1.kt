@@ -497,6 +497,172 @@ public interface Secp256k1 {
      * @return 64-byte aggregated schnorr signature.
      */
     public fun frostPartialSigAgg(session: ByteArray, psigs: Array<ByteArray>): ByteArray
+
+    /**
+     * Compute the ChillDKG host public key of a participant. The host public key is the long-term cryptographic
+     * identity of the participant in a DKG session.
+     *
+     * WARNING: the underlying secp256k1 ChillDKG module is experimental and must not be used in production.
+     *
+     * @param hostseckey32 32-byte host secret key.
+     * @return 33-byte compressed host public key.
+     */
+    public fun chilldkgHostpubkeyGen(hostseckey32: ByteArray): ByteArray
+
+    /**
+     * Compute a hash of the ChillDKG session parameters, for out-of-band comparison between participants. If all
+     * participants obtain the same hash, they all agree on the host public keys and the threshold.
+     *
+     * @param hostpubkeys33 33-byte compressed host public keys of all participants (in the order agreed upon by
+     * all participants).
+     * @param threshold threshold t: the number of signers required to produce a signature.
+     * @return 32-byte hash of the session parameters.
+     */
+    public fun chilldkgParamsHash(hostpubkeys33: Array<ByteArray>, threshold: Int): ByteArray
+
+    /**
+     * Perform a participant's first step of a ChillDKG session.
+     *
+     * @param hostseckey32 32-byte host secret key.
+     * @param hostpubkeys33 33-byte compressed host public keys of all participants; all participants must agree
+     * on the order.
+     * @param threshold threshold t.
+     * @param random32 32 bytes of fresh randomness.
+     * @return the participant's session state (opaque [CHILLDKG_PARTICIPANT_STATE1_SIZE]-byte blob, to be passed
+     * to a single [chilldkgParticipantStep2] call) and the message to send to the coordinator (pmsg1).
+     */
+    public fun chilldkgParticipantStep1(hostseckey32: ByteArray, hostpubkeys33: Array<ByteArray>, threshold: Int, random32: ByteArray): Pair<ByteArray, ByteArray>
+
+    /**
+     * Perform the coordinator's first step of a ChillDKG session: aggregate the participants' first messages
+     * into the message to broadcast to all participants.
+     *
+     * @param pmsgs1 the participants' first messages (see [chilldkgParticipantStep1]), in the same order as
+     * [hostpubkeys33].
+     * @param hostpubkeys33 33-byte compressed host public keys of all participants; must be identical (in content
+     * and order) to the arrays used by the participants.
+     * @param threshold threshold t.
+     * @return the fault report, the coordinator's session state (opaque [CHILLDKG_COORDINATOR_STATE_SIZE]-byte
+     * blob, to be passed to a single [chilldkgCoordinatorFinalize] call) and the message to broadcast to all
+     * participants (cmsg1).
+     */
+    public fun chilldkgCoordinatorStep1(pmsgs1: Array<ByteArray>, hostpubkeys33: Array<ByteArray>, threshold: Int): ChilldkgCoordinatorStep1Result
+
+    /**
+     * Perform a participant's second step of a ChillDKG session: verify the coordinator's first message, compute
+     * the DKG output, and produce the CertEq signature over the session transcript (pmsg2).
+     *
+     * Warning: after sending the produced signature to the coordinator, the caller must not erase its host secret
+     * key, even if the coordinator's reply needed for [chilldkgParticipantFinalize] is not received (some other
+     * participant may deem the session successful and use the resulting threshold public key).
+     *
+     * @param hostseckey32 32-byte host secret key (must be the same as in [chilldkgParticipantStep1]).
+     * @param state1 session state output by [chilldkgParticipantStep1] (must not be reused).
+     * @param cmsg1 the coordinator's first message (see [chilldkgCoordinatorStep1]).
+     * @param auxRand32 32 bytes of auxiliary randomness for the CertEq signature (see BIP 340).
+     * @return the fault report, the participant's session state (opaque [CHILLDKG_PARTICIPANT_STATE2_SIZE]-byte
+     * blob, to be passed to a single [chilldkgParticipantFinalize] call), the 64-byte CertEq signature to send to
+     * the coordinator, and the investigation data to pass to [chilldkgParticipantInvestigate] (only set when the
+     * fault code is [ChilldkgFault.UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR]).
+     */
+    public fun chilldkgParticipantStep2(hostseckey32: ByteArray, state1: ByteArray, cmsg1: ByteArray, auxRand32: ByteArray): ChilldkgParticipantStep2Result
+
+    /**
+     * Perform the coordinator's final step of a ChillDKG session: collect the CertEq signatures into the
+     * certificate and verify all of them.
+     *
+     * @param state coordinator's session state output by [chilldkgCoordinatorStep1] (must not be reused).
+     * @param pmsgs2 the participants' second messages (64-byte CertEq signatures), in the same order as the
+     * host public keys.
+     * @param threshold threshold t.
+     * @return the fault report, the certificate to broadcast to all participants (cmsg2), the threshold public
+     * key (33 bytes, compressed), the public shares of all participants (33 bytes each) and the recovery data.
+     */
+    public fun chilldkgCoordinatorFinalize(state: ByteArray, pmsgs2: Array<ByteArray>, threshold: Int): ChilldkgCoordinatorFinalizeResult
+
+    /**
+     * Perform a participant's final step of a ChillDKG session: verify the certificate and compute the DKG output.
+     * If the returned fault report is ok, this participant deems the DKG session successful.
+     *
+     * @param state2 session state output by [chilldkgParticipantStep2] (must not be reused).
+     * @param cmsg2 the certificate (see [chilldkgCoordinatorFinalize]).
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t.
+     * @return the fault report, the participant's 32-byte secret share, the threshold public key (33 bytes,
+     * compressed), the public shares of all participants (33 bytes each) and the recovery data.
+     */
+    public fun chilldkgParticipantFinalize(state2: ByteArray, cmsg2: ByteArray, nParticipants: Int, threshold: Int): ChilldkgParticipantFinalizeResult
+
+    /**
+     * Recover a participant's DKG output from recovery data, e.g. after a failure of [chilldkgParticipantFinalize]
+     * (using recovery data obtained from another participant or the coordinator) or after data loss. The recovery
+     * data is self-delimiting: the number of participants and the threshold are derived from it.
+     *
+     * @param hostseckey32 32-byte host secret key.
+     * @param recovery the recovery data of the session.
+     * @return the fault report, the participant's 32-byte secret share, the threshold public key, the public
+     * shares and host public keys of all participants, and the number of participants and threshold of the
+     * recovered session.
+     */
+    public fun chilldkgParticipantRecover(hostseckey32: ByteArray, recovery: ByteArray): ChilldkgRecoverResult
+
+    /**
+     * Recover the DKG output of the coordinator from recovery data. Like [chilldkgParticipantRecover], but for
+     * the coordinator, who has no secret share (the returned secret share is null).
+     *
+     * @param recovery the recovery data of the session.
+     */
+    public fun chilldkgCoordinatorRecover(recovery: ByteArray): ChilldkgRecoverResult
+
+    /**
+     * Sign recovery data to create a recovery acknowledgment. Acks can be collected in an optional acknowledgment
+     * round to confirm that all participants have received the recovery data.
+     *
+     * @param hostseckey32 32-byte host secret key.
+     * @param hostpubkeys33 33-byte compressed host public keys of all participants.
+     * @param threshold threshold t.
+     * @param recovery the recovery data of the session.
+     * @param auxRand32 32 bytes of auxiliary randomness (see BIP 340).
+     * @return the 64-byte acknowledgment signature.
+     */
+    public fun chilldkgRecoveryAckSign(hostseckey32: ByteArray, hostpubkeys33: Array<ByteArray>, threshold: Int, recovery: ByteArray, auxRand32: ByteArray): ByteArray
+
+    /**
+     * Verify the recovery acknowledgment signatures of all participants. Note that a failure does NOT mean the
+     * DKG failed (reaching this point implies the DKG itself was successful); it only means it cannot be confirmed
+     * that all participants have a copy of the recovery data.
+     *
+     * @param hostpubkeys33 33-byte compressed host public keys of all participants.
+     * @param threshold threshold t.
+     * @param recovery the recovery data of the session.
+     * @param ackSigs64 the 64-byte acknowledgment signatures, in the same order as [hostpubkeys33].
+     * @return the fault report (ok if all signatures are valid).
+     */
+    public fun chilldkgRecoveryAcksVerify(hostpubkeys33: Array<ByteArray>, threshold: Int, recovery: ByteArray, ackSigs64: Array<ByteArray>): ChilldkgFault
+
+    /**
+     * Generate the investigation message for a single participant, which allows that participant to investigate
+     * who is to blame for a failed ChillDKG session (see [chilldkgParticipantInvestigate]). The message contains
+     * no confidential information and can be safely broadcast.
+     *
+     * @param pmsgs1 the participants' first messages, in the same order as [hostpubkeys33].
+     * @param hostpubkeys33 33-byte compressed host public keys of all participants.
+     * @param threshold threshold t.
+     * @param participantId the participant the investigation message is for.
+     * @return the fault report and the investigation message for the given participant.
+     */
+    public fun chilldkgCoordinatorInvestigate(pmsgs1: Array<ByteArray>, hostpubkeys33: Array<ByteArray>, threshold: Int, participantId: UInt): Pair<ChilldkgFault, ByteArray>
+
+    /**
+     * Investigate who is to blame for a failed ChillDKG session. Can be called when [chilldkgParticipantStep2]
+     * returned [ChilldkgFault.UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR].
+     *
+     * @param investigationData the investigation data output by [chilldkgParticipantStep2] (secret, must not be
+     * shared).
+     * @param cinv the coordinator's investigation message for this participant (see [chilldkgCoordinatorInvestigate]).
+     * @return the fault report identifying the suspected faulty party.
+     */
+    public fun chilldkgParticipantInvestigate(investigationData: ByteArray, cinv: ByteArray): ChilldkgFault
     
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
@@ -513,6 +679,12 @@ public interface Secp256k1 {
         public const val FROST_TWEAK_CACHE_SIZE: Int = 165
         public const val FROST_SESSION_SIZE: Int = 137
         public const val FROST_MAX_PARTICIPANTS: Int = 128
+
+        public const val CHILLDKG_MAX_PARTICIPANTS: Int = 128
+        public const val CHILLDKG_PARTICIPANT_STATE1_SIZE: Int = 4306
+        public const val CHILLDKG_PARTICIPANT_STATE2_SIZE: Int = 21073
+        public const val CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE: Int = 4205
+        public const val CHILLDKG_COORDINATOR_STATE_SIZE: Int = 21041
         /*
          * libsecp256k1 tags each of its opaque musig2 objects with a 4-byte magic prefix and validates it
          * internally with ARG_CHECK, which invokes the context's illegal-argument callback. The default
@@ -533,11 +705,65 @@ public interface Secp256k1 {
         internal val FROST_SECNONCE_MAGIC = byteArrayOf(0x5c.toByte(), 0xcf.toByte(), 0xb9.toByte(), 0x99.toByte())
         internal val FROST_TWEAK_CACHE_MAGIC = byteArrayOf(0x8d.toByte(), 0x86.toByte(), 0xb5.toByte(), 0x01.toByte())
         internal val FROST_SESSION_MAGIC = byteArrayOf(0x34.toByte(), 0xb5.toByte(), 0x27.toByte(), 0x3d.toByte())
+        /*
+         * Same thing for the opaque ChillDKG state objects that are passed back to libsecp256k1 as raw byte arrays.
+         *
+         * Keep in sync with native/secp256k1/src/modules/chilldkg/main_impl.h.
+         */
+        internal val CHILLDKG_PARTICIPANT_STATE1_MAGIC = byteArrayOf(0x3f.toByte(), 0x2c.toByte(), 0x9e.toByte(), 0x51.toByte())
+        internal val CHILLDKG_PARTICIPANT_STATE2_MAGIC = byteArrayOf(0x7a.toByte(), 0xd1.toByte(), 0x44.toByte(), 0x0b.toByte())
+        internal val CHILLDKG_COORDINATOR_STATE_MAGIC = byteArrayOf(0x1b.toByte(), 0x8e.toByte(), 0x63.toByte(), 0xa7.toByte())
+        internal val CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_MAGIC = byteArrayOf(0x62.toByte(), 0x4a.toByte(), 0xc5.toByte(), 0x90.toByte())
         // @formatter:on
     }
 }
 
 internal expect fun getSecpk256k1(): Secp256k1
+
+/**
+ * Fault report of a ChillDKG protocol step, mapping the fault taxonomy of the bip-frost-dkg reference
+ * implementation. Protocol faults (a faulty participant or coordinator) are normal outcomes of a DKG session
+ * and are reported through this type instead of exceptions.
+ */
+public data class ChilldkgFault(val code: Int, val participantIndex: UInt?) {
+    public val isOk: Boolean get() = code == OK
+
+    public companion object {
+        /** No fault; the step succeeded. */
+        public const val OK: Int = 0
+        /** The coordinator is faulty. */
+        public const val FAULTY_COORDINATOR: Int = 1
+        /** The participant identified by [participantIndex] is faulty. */
+        public const val FAULTY_PARTICIPANT: Int = 2
+        /** The participant identified by [participantIndex] or the coordinator is faulty. */
+        public const val FAULTY_PARTICIPANT_OR_COORDINATOR: Int = 3
+        /** Some unknown participant or the coordinator is faulty; the investigation procedure of the protocol
+         * (see [Secp256k1.chilldkgCoordinatorInvestigate] and [Secp256k1.chilldkgParticipantInvestigate]) is
+         * necessary to determine a suspected participant. */
+        public const val UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR: Int = 4
+        /** The caller provided invalid input (e.g. an invalid host secret key or invalid session parameters). */
+        public const val INVALID_INPUT: Int = 5
+    }
+}
+
+/** Result of [Secp256k1.chilldkgCoordinatorStep1]. On fault, [state] and [cmsg1] are zeroed. */
+public data class ChilldkgCoordinatorStep1Result(val fault: ChilldkgFault, val state: ByteArray, val cmsg1: ByteArray)
+
+/** Result of [Secp256k1.chilldkgParticipantStep2]. On fault, [state2] and [sig64] are zeroed; [investigationData]
+ * is only set when the fault code is [ChilldkgFault.UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR]. */
+public data class ChilldkgParticipantStep2Result(val fault: ChilldkgFault, val state2: ByteArray, val sig64: ByteArray, val investigationData: ByteArray?)
+
+/** Result of [Secp256k1.chilldkgCoordinatorFinalize]: the certificate ([cmsg2]) to broadcast to all
+ * participants, and the resulting DKG output. On fault, all outputs are zeroed. */
+public data class ChilldkgCoordinatorFinalizeResult(val fault: ChilldkgFault, val cmsg2: ByteArray, val thresholdPubkey: ByteArray, val pubshares: Array<ByteArray>, val recovery: ByteArray)
+
+/** Result of [Secp256k1.chilldkgParticipantFinalize]: the participant's secret share and the resulting DKG
+ * output. On fault, all outputs are zeroed. */
+public data class ChilldkgParticipantFinalizeResult(val fault: ChilldkgFault, val secshare: ByteArray, val thresholdPubkey: ByteArray, val pubshares: Array<ByteArray>, val recovery: ByteArray)
+
+/** Result of [Secp256k1.chilldkgParticipantRecover] and [Secp256k1.chilldkgCoordinatorRecover]. [secshare] is
+ * null for the coordinator, who has no secret share. On fault, all outputs are zeroed or empty. */
+public data class ChilldkgRecoverResult(val fault: ChilldkgFault, val secshare: ByteArray?, val thresholdPubkey: ByteArray, val pubshares: Array<ByteArray>, val hostpubkeys: Array<ByteArray>, val nParticipants: Int, val threshold: Int)
 
 public class Secp256k1Exception : RuntimeException {
     public constructor() : super()
