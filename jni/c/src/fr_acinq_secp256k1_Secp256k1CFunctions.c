@@ -12,6 +12,7 @@
 #include "include/secp256k1_musig.h"
 #include "include/secp256k1_frost.h"
 #include "include/secp256k1_iceberg.h"
+#include "include/secp256k1_prefractal.h"
 #include "include/secp256k1_iceberg_dealer.h"
 #include "include/secp256k1_recovery.h"
 #include "include/secp256k1_schnorrsig.h"
@@ -2951,4 +2952,249 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     CHECKRESULT(!result, "secp256k1_musig_partial_sig_serialize failed");
 
     return copy_bytes_to_java(penv, out32, 32);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_nonce_agg
+ * Signature: (J[[B[I[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1nonce_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jnonces, jintArray jids, jbyteArray jthreshpk)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char in66[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    unsigned char out132[2 * fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    secp256k1_frost_pubnonce* pubnonces = NULL;
+    secp256k1_frost_pubnonce** pubnonce_ptrs = NULL;
+    secp256k1_musig_pubnonce group_pubnonce;
+    secp256k1_frost_aggnonce aggnonce;
+    secp256k1_pubkey thresh_pk;
+    uint32_t* ids = NULL;
+    jbyteArray jnonce;
+    size_t count, n_signers = 0;
+    size_t i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jnonces == NULL, "public nonces cannot be null");
+    CHECKRESULT(jids == NULL, "signer ids cannot be null");
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return NULL;
+
+    count = (*penv)->GetArrayLength(penv, jnonces);
+    CHECKRESULT(count == 0, "public nonces count cannot be 0");
+
+    ids = get_signer_ids(penv, jids, &n_signers);
+    if (ids == NULL) return NULL;
+    CHECKRESULT1(n_signers != count, "signer ids count must match public nonces count", free(ids));
+
+    pubnonces = calloc(count, sizeof(secp256k1_frost_pubnonce));
+    CHECKRESULT1(pubnonces == NULL, "memory allocation error", free(ids));
+    pubnonce_ptrs = calloc(count, sizeof(secp256k1_frost_pubnonce*));
+    CHECKRESULT1(pubnonce_ptrs == NULL, "memory allocation error", free(ids); free(pubnonces));
+
+    for (i = 0; i < count; i++) {
+        pubnonce_ptrs[i] = &(pubnonces[i]);
+        jnonce = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jnonces, i);
+        if (!get_bytes(penv, jnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, in66, "public nonce")) {
+            free(ids);
+            free(pubnonce_ptrs);
+            free(pubnonces);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jnonce);
+        result = secp256k1_frost_pubnonce_parse(ctx, pubnonce_ptrs[i], in66);
+        CHECKRESULT1(!result, "secp256k1_frost_pubnonce_parse failed", free(ids); free(pubnonce_ptrs); free(pubnonces));
+    }
+
+    result = secp256k1_prefractal_nonce_agg(ctx, &group_pubnonce, &aggnonce, (const secp256k1_frost_pubnonce* const*)pubnonce_ptrs, ids, n_signers, &thresh_pk);
+    free(ids);
+    free(pubnonce_ptrs);
+    free(pubnonces);
+    CHECKRESULT(!result, "secp256k1_prefractal_nonce_agg failed");
+
+    /* The wire nonce first, then the unscaled frost aggregate. The caller
+     * splits them; keeping them in one array avoids a JNI object array for
+     * what is always exactly two fixed-size values. */
+    result = secp256k1_musig_pubnonce_serialize(ctx, &out132[0], &group_pubnonce);
+    CHECKRESULT(!result, "secp256k1_musig_pubnonce_serialize failed");
+    result = secp256k1_frost_aggnonce_serialize(ctx, &out132[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE], &aggnonce);
+    CHECKRESULT(!result, "secp256k1_frost_aggnonce_serialize failed");
+
+    return copy_bytes_to_java(penv, out132, sizeof(out132));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_sign
+ * Signature: (J[B[BI[I[[B[B[B[B[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsecnonce, jbyteArray jsecshare32, jint jmyid, jintArray jids, jobjectArray jpubshares, jbyteArray jaggnonce, jbyteArray jthreshpk, jbyteArray jtweakcache, jbyteArray jkeyaggcache, jbyteArray jcosigneraggnonce, jbyteArray jmsg32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_secnonce secnonce;
+    secp256k1_frost_tweak_cache tweak_cache;
+    secp256k1_frost_aggnonce aggnonce;
+    secp256k1_frost_partial_sig psig;
+    secp256k1_musig_keyagg_cache keyagg_cache;
+    secp256k1_musig_aggnonce cosigner_aggnonce;
+    secp256k1_pubkey thresh_pk;
+    secp256k1_pubkey* pubshares = NULL;
+    uint32_t* ids = NULL;
+    unsigned char secshare32[32], msg32[32], sig[32];
+    unsigned char buffer[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    size_t n_pubshares = 0, n_signers = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    /* Every opaque blob is magic-checked before it reaches libsecp256k1: the
+     * default ARG_CHECK callback would otherwise abort the process. */
+    if (!get_bytes(penv, jsecnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_SECRET_NONCE_SIZE, secnonce.data, "secret nonce")) return NULL;
+    CHECKMAGIC(secnonce.data, FROST_SECNONCE_MAGIC, "invalid secret nonce");
+    if (!get_bytes32(penv, jsecshare32, secshare32, "secret share")) return NULL;
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, tweak_cache.data, "tweak cache")) return NULL;
+    CHECKMAGIC(tweak_cache.data, FROST_TWEAK_CACHE_MAGIC, "invalid tweak cache");
+    if (!get_bytes(penv, jkeyaggcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_KEYAGG_CACHE_SIZE, keyagg_cache.data, "keyagg cache")) return NULL;
+    CHECKMAGIC(keyagg_cache.data, MUSIG_KEYAGG_CACHE_MAGIC, "invalid keyagg cache");
+    if (!get_bytes32(penv, jmsg32, msg32, "message")) return NULL;
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return NULL;
+
+    if (!get_bytes(penv, jaggnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, buffer, "aggregate nonce")) return NULL;
+    result = secp256k1_frost_aggnonce_parse(ctx, &aggnonce, buffer);
+    CHECKRESULT(!result, "secp256k1_frost_aggnonce_parse failed");
+    if (!get_bytes(penv, jcosigneraggnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_PUBLIC_NONCE_SIZE, buffer, "cosigner aggregate nonce")) return NULL;
+    result = secp256k1_musig_aggnonce_parse(ctx, &cosigner_aggnonce, buffer);
+    CHECKRESULT(!result, "secp256k1_musig_aggnonce_parse failed");
+
+    CHECKRESULT(jids == NULL, "signer ids cannot be null");
+    ids = get_signer_ids(penv, jids, &n_signers);
+    if (ids == NULL) return NULL;
+    CHECKRESULT1(n_signers < 1, "signer ids cannot be empty", free(ids));
+
+    if (jpubshares != NULL) {
+        pubshares = get_pubshares(penv, ctx, jpubshares, &n_pubshares);
+        if (pubshares == NULL) {
+            free(ids);
+            return NULL;
+        }
+        CHECKRESULT1(n_pubshares != n_signers, "public shares count must match signer ids count", free(ids); free(pubshares));
+    }
+
+    result = secp256k1_prefractal_sign(ctx, &psig, &secnonce, secshare32, (uint32_t)jmyid, ids, pubshares, n_signers, &aggnonce, &thresh_pk, &tweak_cache, &keyagg_cache, &cosigner_aggnonce, msg32);
+    free(ids);
+    free(pubshares);
+    CHECKRESULT(!result, "secp256k1_prefractal_sign failed");
+
+    result = secp256k1_frost_partial_sig_serialize(ctx, sig, &psig);
+    CHECKRESULT(!result, "secp256k1_frost_partial_sig_serialize failed");
+
+    return copy_bytes_to_java(penv, sig, 32);
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_partial_sig_verify
+ * Signature: (J[B[B[BI[I[B[B[B[B[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1partial_1sig_1verify(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jpartialsig, jbyteArray jpubnonce, jbyteArray jpubshare, jint jmyid, jintArray jids, jbyteArray jaggnonce, jbyteArray jthreshpk, jbyteArray jtweakcache, jbyteArray jkeyaggcache, jbyteArray jcosigneraggnonce, jbyteArray jmsg32)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_partial_sig psig;
+    secp256k1_frost_pubnonce pubnonce;
+    secp256k1_frost_tweak_cache tweak_cache;
+    secp256k1_frost_aggnonce aggnonce;
+    secp256k1_musig_keyagg_cache keyagg_cache;
+    secp256k1_musig_aggnonce cosigner_aggnonce;
+    secp256k1_pubkey thresh_pk, pubshare;
+    uint32_t* ids = NULL;
+    unsigned char sig32[32], msg32[32];
+    unsigned char buffer[fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE];
+    size_t n_signers = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jpartialsig, 32, sig32, "partial signature")) return 0;
+    result = secp256k1_frost_partial_sig_parse(ctx, &psig, sig32);
+    CHECKRESULT(!result, "secp256k1_frost_partial_sig_parse failed");
+    if (!get_bytes(penv, jpubnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, buffer, "public nonce")) return 0;
+    result = secp256k1_frost_pubnonce_parse(ctx, &pubnonce, buffer);
+    CHECKRESULT(!result, "secp256k1_frost_pubnonce_parse failed");
+    if (!get_pubkey(penv, ctx, jpubshare, &pubshare)) return 0;
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return 0;
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, tweak_cache.data, "tweak cache")) return 0;
+    CHECKMAGIC(tweak_cache.data, FROST_TWEAK_CACHE_MAGIC, "invalid tweak cache");
+    if (!get_bytes(penv, jkeyaggcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_KEYAGG_CACHE_SIZE, keyagg_cache.data, "keyagg cache")) return 0;
+    CHECKMAGIC(keyagg_cache.data, MUSIG_KEYAGG_CACHE_MAGIC, "invalid keyagg cache");
+    if (!get_bytes32(penv, jmsg32, msg32, "message")) return 0;
+
+    if (!get_bytes(penv, jaggnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_PUBLIC_NONCE_SIZE, buffer, "aggregate nonce")) return 0;
+    result = secp256k1_frost_aggnonce_parse(ctx, &aggnonce, buffer);
+    CHECKRESULT(!result, "secp256k1_frost_aggnonce_parse failed");
+    if (!get_bytes(penv, jcosigneraggnonce, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_MUSIG_PUBLIC_NONCE_SIZE, buffer, "cosigner aggregate nonce")) return 0;
+    result = secp256k1_musig_aggnonce_parse(ctx, &cosigner_aggnonce, buffer);
+    CHECKRESULT(!result, "secp256k1_musig_aggnonce_parse failed");
+
+    CHECKRESULT(jids == NULL, "signer ids cannot be null");
+    ids = get_signer_ids(penv, jids, &n_signers);
+    if (ids == NULL) return 0;
+    CHECKRESULT1(n_signers < 1, "signer ids cannot be empty", free(ids));
+
+    /* A failed verification is an answer, not an error: this is the
+     * identifiable-abort tool, so it returns 0/1 rather than throwing. */
+    result = secp256k1_prefractal_partial_sig_verify(ctx, &psig, &pubnonce, &pubshare, (uint32_t)jmyid, ids, n_signers, &aggnonce, &thresh_pk, &tweak_cache, &keyagg_cache, &cosigner_aggnonce, msg32);
+    free(ids);
+    return result;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_partial_sig_agg
+ * Signature: (J[[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1partial_1sig_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jpartialsigs, jbyteArray jtweakcache)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_frost_partial_sig* psigs = NULL;
+    secp256k1_frost_partial_sig** psig_ptrs = NULL;
+    secp256k1_frost_tweak_cache tweak_cache;
+    secp256k1_musig_partial_sig out;
+    unsigned char sig32[32];
+    jbyteArray jsig;
+    size_t count, i;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jpartialsigs == NULL, "partial signatures cannot be null");
+    if (!get_bytes(penv, jtweakcache, fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_FROST_TWEAK_CACHE_SIZE, tweak_cache.data, "tweak cache")) return NULL;
+    CHECKMAGIC(tweak_cache.data, FROST_TWEAK_CACHE_MAGIC, "invalid tweak cache");
+
+    count = (*penv)->GetArrayLength(penv, jpartialsigs);
+    CHECKRESULT(count == 0, "partial signatures count cannot be 0");
+
+    psigs = calloc(count, sizeof(secp256k1_frost_partial_sig));
+    CHECKRESULT(psigs == NULL, "memory allocation error");
+    psig_ptrs = calloc(count, sizeof(secp256k1_frost_partial_sig*));
+    CHECKRESULT1(psig_ptrs == NULL, "memory allocation error", free(psigs));
+
+    for (i = 0; i < count; i++) {
+        psig_ptrs[i] = &(psigs[i]);
+        jsig = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jpartialsigs, i);
+        if (!get_bytes(penv, jsig, 32, sig32, "partial signature")) {
+            free(psig_ptrs);
+            free(psigs);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jsig);
+        result = secp256k1_frost_partial_sig_parse(ctx, psig_ptrs[i], sig32);
+        CHECKRESULT1(!result, "secp256k1_frost_partial_sig_parse failed", free(psig_ptrs); free(psigs));
+    }
+
+    result = secp256k1_prefractal_partial_sig_agg(ctx, &out, NULL, (const secp256k1_frost_partial_sig* const*)psig_ptrs, count, &tweak_cache);
+    free(psig_ptrs);
+    free(psigs);
+    CHECKRESULT(!result, "secp256k1_prefractal_partial_sig_agg failed");
+
+    result = secp256k1_musig_partial_sig_serialize(ctx, sig32, &out);
+    CHECKRESULT(!result, "secp256k1_musig_partial_sig_serialize failed");
+
+    return copy_bytes_to_java(penv, sig32, 32);
 }

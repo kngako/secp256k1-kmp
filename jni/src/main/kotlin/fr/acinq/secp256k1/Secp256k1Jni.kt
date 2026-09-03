@@ -310,6 +310,55 @@ public object Secp256k1Jni : Secp256k1 {
         return Secp256k1CFunctions.secp256k1_frost_sign(Secp256k1Context.getContext(), secnonce, secshare32, session, ids.map { it.toInt() }.toIntArray(), pubshares, myId.toInt())
     }
 
+    override fun prefractalNonceAgg(pubnonces: Array<ByteArray>, ids: UIntArray, threshPk: ByteArray): Pair<ByteArray, ByteArray> {
+        require(pubnonces.isNotEmpty()) { "public nonces must not be empty" }
+        pubnonces.forEach { require(it.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" } }
+        require(ids.size == pubnonces.size) { "signer ids count must match public nonces count" }
+        require(ids.distinct().size == ids.size) { "signer ids must be unique" }
+        require(threshPk.size == 33 || threshPk.size == 65) { "threshold public key must be 33 or 65 bytes" }
+        val out = Secp256k1CFunctions.secp256k1_prefractal_nonce_agg(Secp256k1Context.getContext(), pubnonces, ids.map { it.toInt() }.toIntArray(), threshPk)
+        // The glue returns the wire nonce and the unscaled frost aggregate concatenated.
+        return Pair(out.copyOfRange(0, Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE), out.copyOfRange(Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE, out.size))
+    }
+
+    override fun prefractalSign(secnonce: ByteArray, secshare32: ByteArray, myId: UInt, ids: UIntArray, pubshares: Array<ByteArray>?, aggnonce: ByteArray, threshPk: ByteArray, tweakCache: ByteArray, keyaggCache: ByteArray, cosignerAggnonce: ByteArray, msg32: ByteArray): ByteArray {
+        require(secnonce.size == Secp256k1.FROST_SECRET_NONCE_SIZE) { "secret nonce must be ${Secp256k1.FROST_SECRET_NONCE_SIZE} bytes" }
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        require(ids.isNotEmpty()) { "signer ids must not be empty" }
+        require(myId in ids) { "signer id must be one of the session's signer ids" }
+        require(ids.distinct().size == ids.size) { "signer ids must be unique" }
+        pubshares?.let { require(it.size == ids.size) { "public shares count must match signer ids count" } }
+        require(aggnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "aggregate nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" }
+        require(threshPk.size == 33 || threshPk.size == 65) { "threshold public key must be 33 or 65 bytes" }
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) { "invalid keyagg cache size" }
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE) { "cosigner aggregate nonce must be ${Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE} bytes" }
+        require(msg32.size == 32) { "message must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_prefractal_sign(Secp256k1Context.getContext(), secnonce, secshare32, myId.toInt(), ids.map { it.toInt() }.toIntArray(), pubshares, aggnonce, threshPk, tweakCache, keyaggCache, cosignerAggnonce, msg32)
+    }
+
+    override fun prefractalPartialSigVerify(partialSig: ByteArray, pubnonce: ByteArray, pubshare: ByteArray, myId: UInt, ids: UIntArray, aggnonce: ByteArray, threshPk: ByteArray, tweakCache: ByteArray, keyaggCache: ByteArray, cosignerAggnonce: ByteArray, msg32: ByteArray): Int {
+        require(partialSig.size == 32) { "partial signature must be 32 bytes" }
+        require(pubnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "public nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" }
+        require(pubshare.size == 33 || pubshare.size == 65) { "public share must be 33 or 65 bytes" }
+        require(ids.isNotEmpty()) { "signer ids must not be empty" }
+        require(ids.distinct().size == ids.size) { "signer ids must be unique" }
+        require(aggnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) { "aggregate nonce must be ${Secp256k1.FROST_PUBLIC_NONCE_SIZE} bytes" }
+        require(threshPk.size == 33 || threshPk.size == 65) { "threshold public key must be 33 or 65 bytes" }
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE) { "invalid keyagg cache size" }
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE) { "cosigner aggregate nonce must be ${Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE} bytes" }
+        require(msg32.size == 32) { "message must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_prefractal_partial_sig_verify(Secp256k1Context.getContext(), partialSig, pubnonce, pubshare, myId.toInt(), ids.map { it.toInt() }.toIntArray(), aggnonce, threshPk, tweakCache, keyaggCache, cosignerAggnonce, msg32)
+    }
+
+    override fun prefractalPartialSigAgg(partialSigs: Array<ByteArray>, tweakCache: ByteArray): ByteArray {
+        require(partialSigs.isNotEmpty()) { "partial signatures must not be empty" }
+        partialSigs.forEach { require(it.size == 32) { "partial signature must be 32 bytes" } }
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE) { "invalid tweak cache size" }
+        return Secp256k1CFunctions.secp256k1_prefractal_partial_sig_agg(Secp256k1Context.getContext(), partialSigs, tweakCache)
+    }
+
     override fun frostDeterministicSign(secshare32: ByteArray, myId: UInt, aggOtherNonce: ByteArray?, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray, auxRand32: ByteArray?): Pair<ByteArray, ByteArray> {
         require(secshare32.size == 32) { "secret share must be 32 bytes" }
         require(ids.isNotEmpty()) { "signer ids must not be empty" }

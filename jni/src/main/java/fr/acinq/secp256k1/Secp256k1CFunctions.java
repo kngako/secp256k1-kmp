@@ -203,6 +203,19 @@ public class Secp256k1CFunctions {
 
     public static native byte[] secp256k1_frost_nonce_agg(long ctx, byte[][] pubnonces);
 
+    /**
+     * Nested FROST+MuSig2 ("prefractal"). Nonces and aggregate nonces cross this boundary in their 66-byte
+     * serialised form and are parsed inside the glue; the tweak and keyagg caches cross as their opaque blobs.
+     * Returns the group's musig2 public nonce and the unscaled frost aggregate nonce, concatenated.
+     */
+    public static native byte[] secp256k1_prefractal_nonce_agg(long ctx, byte[][] pubnonces, int[] ids, byte[] thresh_pk);
+
+    public static native byte[] secp256k1_prefractal_sign(long ctx, byte[] secnonce, byte[] secshare32, int my_id, int[] ids, byte[][] pubshares, byte[] aggnonce, byte[] thresh_pk, byte[] tweak_cache, byte[] keyagg_cache, byte[] cosigner_aggnonce, byte[] msg32);
+
+    public static native int secp256k1_prefractal_partial_sig_verify(long ctx, byte[] partial_sig, byte[] pubnonce, byte[] pubshare, int my_id, int[] ids, byte[] aggnonce, byte[] thresh_pk, byte[] tweak_cache, byte[] keyagg_cache, byte[] cosigner_aggnonce, byte[] msg32);
+
+    public static native byte[] secp256k1_prefractal_partial_sig_agg(long ctx, byte[][] partial_sigs, byte[] tweak_cache);
+
     public static native byte[] secp256k1_frost_session_init(long ctx, byte[] aggnonce, int[] ids, byte[][] pubshares, int n_participants, int threshold, byte[] tweak_cache, byte[] msg);
 
     public static native byte[] secp256k1_frost_sign(long ctx, byte[] secnonce, byte[] secshare32, byte[] session, int[] ids, byte[][] pubshares, int my_id);

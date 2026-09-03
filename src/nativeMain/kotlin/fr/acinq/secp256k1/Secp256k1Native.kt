@@ -778,6 +778,121 @@ public object Secp256k1Native : Secp256k1 {
         }
     }
 
+    override fun prefractalNonceAgg(pubnonces: Array<ByteArray>, ids: UIntArray, threshPk: ByteArray): Pair<ByteArray, ByteArray> {
+        require(pubnonces.isNotEmpty())
+        pubnonces.forEach { require(it.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE) }
+        require(ids.size == pubnonces.size) { "signer ids count must match public nonces count" }
+        require(ids.toSet().size == ids.size) { "signer ids must be unique" }
+        require(threshPk.size == 33 || threshPk.size == 65)
+        memScoped {
+            val nPubnonces = pubnonces.map { allocFrostPubnonce(it).ptr }
+            val nThreshPk = allocPublicKey(threshPk)
+            val nGroupPubnonce = alloc<secp256k1_musig_pubnonce>()
+            val nAggnonce = alloc<secp256k1_frost_aggnonce>()
+            secp256k1_prefractal_nonce_agg(ctx, nGroupPubnonce.ptr, nAggnonce.ptr, nPubnonces.toCValues(), ids.toCValues(), pubnonces.size.convert(), nThreshPk.ptr)
+                .requireSuccess("secp256k1_prefractal_nonce_agg() failed")
+            val wire = allocArray<UByteVar>(Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
+            secp256k1_musig_pubnonce_serialize(ctx, wire, nGroupPubnonce.ptr).requireSuccess("secp256k1_musig_pubnonce_serialize() failed")
+            val unscaled = allocArray<UByteVar>(Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+            secp256k1_frost_aggnonce_serialize(ctx, unscaled, nAggnonce.ptr).requireSuccess("secp256k1_frost_aggnonce_serialize() failed")
+            return Pair(wire.readBytes(Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE), unscaled.readBytes(Secp256k1.FROST_PUBLIC_NONCE_SIZE))
+        }
+    }
+
+    override fun prefractalSign(secnonce: ByteArray, secshare32: ByteArray, myId: UInt, ids: UIntArray, pubshares: Array<ByteArray>?, aggnonce: ByteArray, threshPk: ByteArray, tweakCache: ByteArray, keyaggCache: ByteArray, cosignerAggnonce: ByteArray, msg32: ByteArray): ByteArray {
+        require(secnonce.size == Secp256k1.FROST_SECRET_NONCE_SIZE)
+        require(secshare32.size == 32)
+        require(ids.isNotEmpty())
+        require(myId in ids) { "signer id must be one of the session's signer ids" }
+        require(ids.toSet().size == ids.size) { "signer ids must be unique" }
+        pubshares?.let { require(it.size == ids.size) }
+        require(aggnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+        require(threshPk.size == 33 || threshPk.size == 65)
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
+        require(msg32.size == 32)
+        secnonce.checkMagic(Secp256k1.FROST_SECNONCE_MAGIC, "secret nonce")
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        memScoped {
+            val nSecnonce = alloc<secp256k1_frost_secnonce>()
+            memcpy(nSecnonce.ptr, toNat(secnonce), Secp256k1.FROST_SECRET_NONCE_SIZE.toULong())
+            val nAggnonce = alloc<secp256k1_frost_aggnonce>()
+            secp256k1_frost_aggnonce_parse(ctx, nAggnonce.ptr, toNat(aggnonce)).requireSuccess("secp256k1_frost_aggnonce_parse() failed")
+            val nThreshPk = allocPublicKey(threshPk)
+            val nTweakCache = allocFrostTweakCache(tweakCache)
+            val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
+            memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
+            val nCosignerAggnonce = alloc<secp256k1_musig_aggnonce>()
+            secp256k1_musig_aggnonce_parse(ctx, nCosignerAggnonce.ptr, toNat(cosignerAggnonce)).requireSuccess("secp256k1_musig_aggnonce_parse() failed")
+            val nPubshares = allocPubshares(pubshares)
+            val nPsig = alloc<secp256k1_frost_partial_sig>()
+            secp256k1_prefractal_sign(
+                ctx, nPsig.ptr, nSecnonce.ptr, toNat(secshare32), myId, ids.toCValues(), nPubshares,
+                ids.size.convert(), nAggnonce.ptr, nThreshPk.ptr, nTweakCache.ptr, nKeyAggCache.ptr,
+                nCosignerAggnonce.ptr, toNat(msg32)
+            ).requireSuccess("secp256k1_prefractal_sign() failed")
+            val psig = ByteArray(32)
+            secp256k1_frost_partial_sig_serialize(ctx, toNat(psig), nPsig.ptr).requireSuccess("secp256k1_frost_partial_sig_serialize() failed")
+            return psig
+        }
+    }
+
+    override fun prefractalPartialSigVerify(partialSig: ByteArray, pubnonce: ByteArray, pubshare: ByteArray, myId: UInt, ids: UIntArray, aggnonce: ByteArray, threshPk: ByteArray, tweakCache: ByteArray, keyaggCache: ByteArray, cosignerAggnonce: ByteArray, msg32: ByteArray): Int {
+        require(partialSig.size == 32)
+        require(pubnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+        require(pubshare.size == 33 || pubshare.size == 65)
+        require(ids.isNotEmpty())
+        require(ids.toSet().size == ids.size) { "signer ids must be unique" }
+        require(aggnonce.size == Secp256k1.FROST_PUBLIC_NONCE_SIZE)
+        require(threshPk.size == 33 || threshPk.size == 65)
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        require(keyaggCache.size == Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE)
+        require(cosignerAggnonce.size == Secp256k1.MUSIG2_PUBLIC_NONCE_SIZE)
+        require(msg32.size == 32)
+        keyaggCache.checkMagic(Secp256k1.MUSIG_KEYAGG_CACHE_MAGIC, "keyagg cache")
+        memScoped {
+            val nPsig = alloc<secp256k1_frost_partial_sig>()
+            secp256k1_frost_partial_sig_parse(ctx, nPsig.ptr, toNat(partialSig)).requireSuccess("secp256k1_frost_partial_sig_parse() failed")
+            val nPubnonce = allocFrostPubnonce(pubnonce)
+            val nPubshare = allocPublicKey(pubshare)
+            val nAggnonce = alloc<secp256k1_frost_aggnonce>()
+            secp256k1_frost_aggnonce_parse(ctx, nAggnonce.ptr, toNat(aggnonce)).requireSuccess("secp256k1_frost_aggnonce_parse() failed")
+            val nThreshPk = allocPublicKey(threshPk)
+            val nTweakCache = allocFrostTweakCache(tweakCache)
+            val nKeyAggCache = alloc<secp256k1_musig_keyagg_cache>()
+            memcpy(nKeyAggCache.ptr, toNat(keyaggCache), Secp256k1.MUSIG2_PUBLIC_KEYAGG_CACHE_SIZE.toULong())
+            val nCosignerAggnonce = alloc<secp256k1_musig_aggnonce>()
+            secp256k1_musig_aggnonce_parse(ctx, nCosignerAggnonce.ptr, toNat(cosignerAggnonce)).requireSuccess("secp256k1_musig_aggnonce_parse() failed")
+            // A failed verification is an answer, not an error: this is the identifiable-abort tool.
+            return secp256k1_prefractal_partial_sig_verify(
+                ctx, nPsig.ptr, nPubnonce.ptr, nPubshare.ptr, myId, ids.toCValues(), ids.size.convert(),
+                nAggnonce.ptr, nThreshPk.ptr, nTweakCache.ptr, nKeyAggCache.ptr, nCosignerAggnonce.ptr, toNat(msg32)
+            )
+        }
+    }
+
+    override fun prefractalPartialSigAgg(partialSigs: Array<ByteArray>, tweakCache: ByteArray): ByteArray {
+        require(partialSigs.isNotEmpty())
+        partialSigs.forEach { require(it.size == 32) }
+        require(tweakCache.size == Secp256k1.FROST_TWEAK_CACHE_SIZE)
+        memScoped {
+            val nPsigs = partialSigs.map {
+                val nPsig = alloc<secp256k1_frost_partial_sig>()
+                secp256k1_frost_partial_sig_parse(ctx, nPsig.ptr, toNat(it)).requireSuccess("secp256k1_frost_partial_sig_parse() failed")
+                nPsig.ptr
+            }
+            val nTweakCache = allocFrostTweakCache(tweakCache)
+            val nErrorIndex = alloc<size_tVar>()
+            val nOut = alloc<secp256k1_musig_partial_sig>()
+            secp256k1_prefractal_partial_sig_agg(ctx, nOut.ptr, nErrorIndex.ptr, nPsigs.toCValues(), partialSigs.size.convert(), nTweakCache.ptr)
+                .requireSuccess("secp256k1_prefractal_partial_sig_agg() failed")
+            val out = ByteArray(32)
+            secp256k1_musig_partial_sig_serialize(ctx, toNat(out), nOut.ptr).requireSuccess("secp256k1_musig_partial_sig_serialize() failed")
+            return out
+        }
+    }
+
     override fun frostDeterministicSign(secshare32: ByteArray, myId: UInt, aggOtherNonce: ByteArray?, ids: UIntArray, pubshares: Array<ByteArray>?, nParticipants: Int, threshold: Int, tweakCache: ByteArray, msg: ByteArray, auxRand32: ByteArray?): Pair<ByteArray, ByteArray> {
         require(secshare32.size == 32)
         require(ids.isNotEmpty())

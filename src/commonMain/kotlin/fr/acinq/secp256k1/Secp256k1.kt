@@ -454,6 +454,68 @@ public interface Secp256k1 {
     public fun frostSign(secnonce: ByteArray, secshare32: ByteArray, session: ByteArray, ids: UIntArray, pubshares: Array<ByteArray>?, myId: UInt): ByteArray
 
     /**
+     * Aggregate a prefractal group's public nonces (nested FROST+MuSig2).
+     *
+     * The group's threshold public key occupies one participant slot of an ordinary musig2 session. This returns
+     * the nonce the group puts on the wire, which is an ordinary 66-byte musig2 public nonce, together with the
+     * UNSCALED frost aggregate nonce that the members need for [prefractalSign]. The latter is an internal value,
+     * not a wire value: hand it back to [prefractalSign] and [prefractalPartialSigVerify] unchanged.
+     *
+     * The signer set fixed here must be exactly the set that signs: both the Lagrange coefficients and the
+     * aggregate nonce are defined over the participating set, so signing with a subset produces an invalid
+     * signature and raises nothing.
+     *
+     * @param pubnonces public nonces of the u members (see [frostNonceGen]), 66 bytes each.
+     * @param ids identifiers of the u members (entry i belongs to pubnonces[i]). Must be unique.
+     * @param threshPk the group's untweaked threshold public key.
+     * @return the group's 66-byte musig2 public nonce, and the 66-byte unscaled frost aggregate nonce.
+     */
+    public fun prefractalNonceAgg(pubnonces: Array<ByteArray>, ids: UIntArray, threshPk: ByteArray): Pair<ByteArray, ByteArray>
+
+    /**
+     * Create one prefractal group member's partial signature (nested FROST+MuSig2).
+     *
+     * @param secnonce member's secret nonce (see [frostNonceGen]). It is wiped and must not be reused, including
+     * when this call fails.
+     * @param secshare32 member's 32-byte secret share.
+     * @param myId member's identifier (must be one of [ids]).
+     * @param ids identifiers of the u members, identical to the array given to [prefractalNonceAgg].
+     * @param pubshares (optional) public shares of the members, in the order of [ids]. If provided, the secret
+     * share is checked against the member's public share (recommended).
+     * @param aggnonce the unscaled frost aggregate nonce returned by [prefractalNonceAgg].
+     * @param threshPk the group's untweaked threshold public key.
+     * @param tweakCache the group's frost tweak cache, which must be the identity: this composition tweaks only
+     * the outer aggregate key.
+     * @param keyaggCache the OUTER musig2 keyagg cache, already carrying any BIP341 tweak.
+     * @param cosignerAggnonce aggregate of the NON-group participants' musig2 public nonces.
+     * @param msg32 the 32-byte message being signed.
+     * @return 32-byte partial signature.
+     */
+    public fun prefractalSign(secnonce: ByteArray, secshare32: ByteArray, myId: UInt, ids: UIntArray, pubshares: Array<ByteArray>?, aggnonce: ByteArray, threshPk: ByteArray, tweakCache: ByteArray, keyaggCache: ByteArray, cosignerAggnonce: ByteArray, msg32: ByteArray): ByteArray
+
+    /**
+     * Verify one prefractal group member's partial signature, for identifiable abort.
+     *
+     * Every session parameter must match the one [prefractalSign] was given.
+     *
+     * @param partialSig the 32-byte partial signature to verify.
+     * @param pubnonce the member's 66-byte public nonce, as given to [prefractalNonceAgg].
+     * @param pubshare the member's public share.
+     * @return 1 if the partial signature is valid, 0 otherwise.
+     */
+    public fun prefractalPartialSigVerify(partialSig: ByteArray, pubnonce: ByteArray, pubshare: ByteArray, myId: UInt, ids: UIntArray, aggnonce: ByteArray, threshPk: ByteArray, tweakCache: ByteArray, keyaggCache: ByteArray, cosignerAggnonce: ByteArray, msg32: ByteArray): Int
+
+    /**
+     * Sum a prefractal group's partial signatures into one ordinary musig2 partial signature, ready to be
+     * aggregated alongside the cosigners' with [musigPartialSigAgg].
+     *
+     * @param partialSigs the members' 32-byte partial signatures (see [prefractalSign]).
+     * @param tweakCache the group's frost tweak cache, which must be the identity.
+     * @return 32-byte musig2 partial signature.
+     */
+    public fun prefractalPartialSigAgg(partialSigs: Array<ByteArray>, tweakCache: ByteArray): ByteArray
+
+    /**
      * Create a FROST partial signature with a deterministically derived nonce (BIP 445 DeterministicSign), for a
      * signer that is online throughout the whole session. The nonce is derived from the secret share, the signer
      * set, the other signers' aggregate nonce, the tweaked threshold public key, and the message.

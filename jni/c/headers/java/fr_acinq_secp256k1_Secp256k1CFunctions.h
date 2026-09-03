@@ -407,6 +407,38 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_nonce_agg
+ * Signature: (J[[B[I[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1nonce_1agg
+  (JNIEnv *, jclass, jlong, jobjectArray, jintArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_sign
+ * Signature: (J[B[BI[I[[B[B[B[B[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1sign
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jint, jintArray, jobjectArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_partial_sig_verify
+ * Signature: (J[B[B[BI[I[B[B[B[B[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1partial_1sig_1verify
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jint, jintArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_prefractal_partial_sig_agg
+ * Signature: (J[[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1prefractal_1partial_1sig_1agg
+  (JNIEnv *, jclass, jlong, jobjectArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
  * Method:    secp256k1_frost_session_init
  * Signature: (J[B[I[[BII[B[B)[B
  */
