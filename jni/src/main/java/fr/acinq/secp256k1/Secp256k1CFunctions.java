@@ -216,6 +216,28 @@ public class Secp256k1CFunctions {
 
     public static native byte[] secp256k1_prefractal_partial_sig_agg(long ctx, byte[][] partial_sigs, byte[] tweak_cache);
 
+    /**
+     * FROST enrollment. Threshold public keys and public shares cross this boundary in either the 33-byte
+     * compressed or the 65-byte uncompressed form and are parsed inside the glue; derived public keys are
+     * returned uncompressed. The u-entry arrays are all aligned with `ids`.
+     */
+    public static native byte[] secp256k1_frost_enrollment_params_hash(long ctx, byte[] thresh_pk, int[] ids, int new_id, int n_participants, int threshold);
+
+    /* Returns the flattened result: the u 32-byte enrollment shares followed by the 32-byte parameters hash. */
+    public static native byte[] secp256k1_frost_enrollment_shares_gen(long ctx, byte[] session_secrand32, byte[] secshare32, byte[] thresh_pk, int[] ids, int my_id, int new_id, int n_participants, int threshold);
+
+    /**
+     * Returns the 32-byte aggregated share, and reports fault attribution through `mismatch_id`, a one-element
+     * array set to the identifier of the helper at fault or to -1 when there is none. Invalid arguments raise a
+     * Secp256k1Exception rather than being reported there.
+     */
+    public static native byte[] secp256k1_frost_enrollment_share_agg(long ctx, byte[][] all_shares32, byte[][] received_params_hashes32, byte[] thresh_pk, int[] ids, int my_id, int new_id, int n_participants, int threshold, int[] mismatch_id);
+
+    public static native byte[] secp256k1_frost_enrollment_pubshare_derive(long ctx, byte[][] pubshares, int[] ids, int new_id, int n_participants, int threshold);
+
+    /* `expected_params_hash32` and `expected_pubshare` are optional: pass null to skip the corresponding check. */
+    public static native byte[] secp256k1_frost_enrollment_secshare_gen(long ctx, byte[][] sigmas32, byte[] thresh_pk, int[] ids, int new_id, int n_participants, int threshold, byte[] expected_params_hash32, byte[] expected_pubshare);
+
     public static native byte[] secp256k1_frost_session_init(long ctx, byte[] aggnonce, int[] ids, byte[][] pubshares, int n_participants, int threshold, byte[] tweak_cache, byte[] msg);
 
     public static native byte[] secp256k1_frost_sign(long ctx, byte[] secnonce, byte[] secshare32, byte[] session, int[] ids, byte[][] pubshares, int my_id);

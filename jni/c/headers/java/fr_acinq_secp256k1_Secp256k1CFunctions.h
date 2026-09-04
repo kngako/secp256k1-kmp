@@ -439,6 +439,46 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_params_hash
+ * Signature: (J[B[IIII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1params_1hash
+  (JNIEnv *, jclass, jlong, jbyteArray, jintArray, jint, jint, jint);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_shares_gen
+ * Signature: (J[B[B[B[IIIII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1shares_1gen
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jintArray, jint, jint, jint, jint);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_share_agg
+ * Signature: (J[[B[[B[B[IIIII[I)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1share_1agg
+  (JNIEnv *, jclass, jlong, jobjectArray, jobjectArray, jbyteArray, jintArray, jint, jint, jint, jint, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_pubshare_derive
+ * Signature: (J[[B[IIII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1pubshare_1derive
+  (JNIEnv *, jclass, jlong, jobjectArray, jintArray, jint, jint, jint);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_secshare_gen
+ * Signature: (J[[B[B[IIII[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1secshare_1gen
+  (JNIEnv *, jclass, jlong, jobjectArray, jbyteArray, jintArray, jint, jint, jint, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
  * Method:    secp256k1_frost_session_init
  * Signature: (J[B[I[[BII[B[B)[B
  */

@@ -561,6 +561,149 @@ public interface Secp256k1 {
     public fun frostPartialSigAgg(session: ByteArray, psigs: Array<ByteArray>): ByteArray
 
     /**
+     * Compute the FROST enrollment parameters hash, which every party of an enrollment run computes for itself
+     * and compares against the ones it receives. Binding the threshold public key makes the hash identify a
+     * group rather than a tuple of numbers: two unrelated groups that happen to share (t, n, ids, newId) produce
+     * different hashes.
+     *
+     * This function operates on public data only, and enforces exactly the same parameter constraints as the
+     * other enrollment functions, so it is also the natural way to pre-validate a parameter tuple.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in
+     * production.
+     *
+     * @param threshPk threshold public key of the group (33 or 65 bytes).
+     * @param ids identifiers of the u helpers. Every id must be unique, smaller than [nParticipants] and
+     * different from [newId]; the order is irrelevant to the hash, which sorts them, but fixes the alignment of
+     * every array in the other enrollment functions.
+     * @param newId identifier of the participant receiving the share: equal to [nParticipants] to enroll a new
+     * participant, or smaller than it to repair the share of an existing one.
+     * @param nParticipants total number of participants n, at most [FROST_MAX_PARTICIPANTS] and strictly
+     * smaller in enrollment mode.
+     * @param threshold threshold t, at least 2 and at most [nParticipants].
+     * @return 32-byte parameters hash.
+     */
+    public fun frostEnrollmentParamsHash(threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int): ByteArray
+
+    /**
+     * Round 1.1 of FROST enrollment: generate a helper's enrollment shares. Computes this helper's Lagrange-scaled
+     * contribution at the target identifier and splits it into u additive shares.
+     *
+     * The returned shares are aligned with [ids]: the entry at [myId]'s own position is kept locally and passed
+     * back into [frostEnrollmentShareAgg], and every other entry must be sent to the helper it is aligned with,
+     * together with the returned parameters hash.
+     *
+     * SECURITY: the returned shares are additive shares of a real secret share. They must be transmitted over
+     * confidential and authenticated channels; this module handles bytes only, transport is the caller's
+     * responsibility.
+     *
+     * Note that, following the convention of [frostSign] and [musigPartialSign], the wipe libsecp256k1 performs
+     * on [sessionSecrand32] is not propagated back to the caller's array: single use is not enforced at this
+     * layer and must be guaranteed by the caller.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in
+     * production.
+     *
+     * @param sessionSecrand32 32 bytes of fresh randomness, which must not be reused across runs.
+     * @param secshare32 this helper's own 32-byte secret share; left unmodified.
+     * @param threshPk threshold public key of the group (33 or 65 bytes).
+     * @param ids identifiers of the u helpers, which fixes the alignment of the returned shares.
+     * @param myId this helper's own identifier, which must appear in [ids].
+     * @param newId identifier of the participant receiving the share.
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t.
+     * @return the u 32-byte enrollment shares aligned with [ids], and the 32-byte parameters hash.
+     */
+    public fun frostEnrollmentSharesGen(sessionSecrand32: ByteArray, secshare32: ByteArray, threshPk: ByteArray, ids: UIntArray, myId: UInt, newId: UInt, nParticipants: Int, threshold: Int): Pair<Array<ByteArray>, ByteArray>
+
+    /**
+     * Round 1.2 of FROST enrollment: check that every helper ran round 1.1 on the same parameters, and aggregate
+     * this helper's enrollment shares into the single value to send to the target participant.
+     *
+     * The two u-entry arrays are both aligned with [ids] but have deliberately opposite conventions for the
+     * caller's own slot, which is what makes this a recomputation check rather than an equality test between
+     * caller-supplied strings:
+     *
+     *  - [allShares32]: the entry at [myId]'s position is read. It is the share [frostEnrollmentSharesGen] kept
+     *    locally.
+     *  - [receivedParamsHashes32]: the entry at [myId]'s position is never read and may be left zero. The own
+     *    hash is always recomputed.
+     *
+     * A helper's contribution is at fault either because its parameters hash disagrees with the recomputed one,
+     * or because its share is not a valid scalar. The two causes are not distinguished, so a caller should not
+     * report one of them specifically; note that the second can name the caller's own identifier, since the
+     * locally kept share is summed along with the rest.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in
+     * production.
+     *
+     * @param allShares32 u 32-byte shares aligned with [ids]: the share kept locally at [myId]'s position, and
+     * the share received from each other helper at theirs.
+     * @param receivedParamsHashes32 u 32-byte parameters hashes aligned with [ids], holding the hash received
+     * from each other helper. The entry at [myId]'s position is ignored.
+     * @param threshPk threshold public key of the group (33 or 65 bytes).
+     * @param ids identifiers of the u helpers, in the same order as in round 1.1.
+     * @param myId this helper's own identifier, which must appear in [ids].
+     * @param newId identifier of the participant receiving the share.
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t.
+     * @return the aggregated share to send to the target participant, or the identifier of the helper at fault.
+     * @throws Secp256k1Exception if the arguments are invalid, as opposed to a helper being at fault.
+     */
+    public fun frostEnrollmentShareAgg(allShares32: Array<ByteArray>, receivedParamsHashes32: Array<ByteArray>, threshPk: ByteArray, ids: UIntArray, myId: UInt, newId: UInt, nParticipants: Int, threshold: Int): FrostEnrollmentShareAggResult
+
+    /**
+     * Derive the public share at the target identifier: the value of the group's public-share polynomial at the
+     * target participant's x-coordinate. This is used both to verify the new secret share in
+     * [frostEnrollmentSecshareGen] and, after an enrollment, to extend the group's table of public shares from n
+     * to n+1 entries.
+     *
+     * This function operates on public data only.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in
+     * production.
+     *
+     * @param pubshares public shares of the u helpers (33 or 65 bytes each), aligned with [ids].
+     * @param ids identifiers of the u helpers.
+     * @param newId identifier of the participant receiving the share.
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t.
+     * @return the derived public share, in uncompressed 65-byte format.
+     */
+    public fun frostEnrollmentPubshareDerive(pubshares: Array<ByteArray>, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int): ByteArray
+
+    /**
+     * Round 2 of FROST enrollment: derive the target participant's secret share from the values received from the
+     * helpers, checking the parameters hash and verifying the result against the expected public share.
+     *
+     * [expectedPubshare] is load-bearing: it is the only check that a helper contributed a correct value. Pass
+     * null only if the resulting share is validated by other means.
+     *
+     * PRECONDITION, documented but not enforced: [threshPk] must come from a source the target participant
+     * authenticates independently of the helpers, and [expectedPubshare] must be derived from public shares
+     * validated against it with [frostThresholdInfoValidate]. Otherwise both checks are circular: t colluding
+     * helpers can present a consistent but fabricated polynomial, and every check here passes on a worthless
+     * share.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in
+     * production.
+     *
+     * @param sigmas32 the u 32-byte values received from the helpers (see [frostEnrollmentShareAgg]), aligned
+     * with [ids].
+     * @param threshPk the independently authenticated threshold public key of the group (33 or 65 bytes).
+     * @param ids identifiers of the u helpers, in the same order as [sigmas32].
+     * @param newId own identifier, the one the share is being derived for.
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t.
+     * @param expectedParamsHash32 the 32-byte parameters hash received from the helpers, or null to skip the
+     * comparison.
+     * @param expectedPubshare the expected public share, from [frostEnrollmentPubshareDerive], or null to skip
+     * the verification (not recommended).
+     * @return the participant's 32-byte secret share.
+     */
+    public fun frostEnrollmentSecshareGen(sigmas32: Array<ByteArray>, threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int, expectedParamsHash32: ByteArray?, expectedPubshare: ByteArray?): ByteArray
+
+    /**
      * Compute the ChillDKG host public key of a participant. The host public key is the long-term cryptographic
      * identity of the participant in a DKG session.
      *
@@ -980,6 +1123,15 @@ public data class ChilldkgParticipantFinalizeResult(val fault: ChilldkgFault, va
 /** Result of [Secp256k1.chilldkgParticipantRecover] and [Secp256k1.chilldkgCoordinatorRecover]. [secshare] is
  * null for the coordinator, who has no secret share. On fault, all outputs are zeroed or empty. */
 public data class ChilldkgRecoverResult(val fault: ChilldkgFault, val secshare: ByteArray?, val thresholdPubkey: ByteArray, val pubshares: Array<ByteArray>, val hostpubkeys: Array<ByteArray>, val nParticipants: Int, val threshold: Int)
+
+/**
+ * Result of [Secp256k1.frostEnrollmentShareAgg]. Exactly one of [sigma] and [mismatchId] is set: on success
+ * [sigma] holds the aggregated share to send to the target participant, and on a protocol fault [mismatchId]
+ * holds the identifier - not the index - of the helper whose contribution was at fault.
+ */
+public data class FrostEnrollmentShareAggResult(val sigma: ByteArray?, val mismatchId: UInt?) {
+    public val isOk: Boolean get() = sigma != null
+}
 
 public class Secp256k1Exception : RuntimeException {
     public constructor() : super()

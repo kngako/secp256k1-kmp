@@ -11,6 +11,7 @@
 #include "include/secp256k1_ecdh.h"
 #include "include/secp256k1_musig.h"
 #include "include/secp256k1_frost.h"
+#include "include/secp256k1_frost_enrollment.h"
 #include "include/secp256k1_iceberg.h"
 #include "include/secp256k1_prefractal.h"
 #include "include/secp256k1_iceberg_dealer.h"
@@ -3197,4 +3198,239 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     CHECKRESULT(!result, "secp256k1_musig_partial_sig_serialize failed");
 
     return copy_bytes_to_java(penv, sig32, 32);
+}
+
+/* Flattens an array of 32-byte values into a freshly malloc'd contiguous buffer, which is the
+ * layout the enrollment functions expect for their u-entry arrays. The caller must free it. */
+static inline unsigned char* get_flat32(JNIEnv* penv, jobjectArray jvalues, size_t* count, const char* name)
+{
+    unsigned char* flat;
+    jbyteArray jvalue;
+    jsize i, n;
+
+    n = (*penv)->GetArrayLength(penv, jvalues);
+    flat = malloc(32 * (n > 0 ? (size_t)n : 1));
+    if (flat == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        jvalue = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jvalues, i);
+        if (!get_bytes(penv, jvalue, 32, flat + 32 * i, name)) {
+            (*penv)->DeleteLocalRef(penv, jvalue);
+            free(flat);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jvalue);
+    }
+    *count = (size_t)n;
+    return flat;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_params_hash
+ * Signature: (J[B[IIII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1params_1hash(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jthreshpk, jintArray jids, jint jnewid, jint jnparticipants, jint jthreshold)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char out32[32];
+    secp256k1_pubkey thresh_pk;
+    uint32_t* ids = NULL;
+    size_t n_ids = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jids == NULL, "helper ids cannot be null");
+    CHECKRESULT(jnewid < 0, "target id cannot be negative");
+    CHECKRESULT(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants");
+    CHECKRESULT(jthreshold < 2 || jthreshold > jnparticipants, "invalid threshold");
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return NULL;
+
+    ids = get_signer_ids(penv, jids, &n_ids);
+    if (ids == NULL) return NULL;
+
+    result = secp256k1_frost_enrollment_params_hash(ctx, out32, &thresh_pk, ids, n_ids, (uint32_t)jnewid, (size_t)jnparticipants, (uint32_t)jthreshold);
+    free(ids);
+    CHECKRESULT(!result, "secp256k1_frost_enrollment_params_hash failed");
+
+    return copy_bytes_to_java(penv, out32, sizeof(out32));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_shares_gen
+ * Signature: (J[B[B[B[IIIII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1shares_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsecrand32, jbyteArray jsecshare32, jbyteArray jthreshpk, jintArray jids, jint jmyid, jint jnewid, jint jnparticipants, jint jthreshold)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    /* The C function wipes session_secrand32. We hand it this local copy, so the caller's array is
+     * left untouched: single use is not enforced at this layer, matching secp256k1_frost_sign. */
+    unsigned char secrand32[32], secshare32[32];
+    unsigned char* out = NULL;
+    secp256k1_pubkey thresh_pk;
+    uint32_t* ids = NULL;
+    size_t n_ids = 0;
+    int result = 0;
+    jbyteArray jout;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jids == NULL, "helper ids cannot be null");
+    CHECKRESULT(jmyid < 0, "own id cannot be negative");
+    CHECKRESULT(jnewid < 0, "target id cannot be negative");
+    CHECKRESULT(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants");
+    CHECKRESULT(jthreshold < 2 || jthreshold > jnparticipants, "invalid threshold");
+    if (!get_bytes32(penv, jsecrand32, secrand32, "session randomness")) return NULL;
+    if (!get_bytes32(penv, jsecshare32, secshare32, "secret share")) return NULL;
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return NULL;
+
+    ids = get_signer_ids(penv, jids, &n_ids);
+    if (ids == NULL) return NULL;
+    CHECKRESULT1(n_ids == 0, "helper ids cannot be empty", free(ids));
+
+    /* The u shares followed by the parameters hash; the caller splits them. */
+    out = malloc(32 * (n_ids + 1));
+    CHECKRESULT1(out == NULL, "memory allocation failed", free(ids));
+
+    result = secp256k1_frost_enrollment_shares_gen(ctx, out, out + 32 * n_ids, secrand32, secshare32, &thresh_pk, ids, n_ids, (uint32_t)jmyid, (uint32_t)jnewid, (size_t)jnparticipants, (uint32_t)jthreshold);
+    free(ids);
+    CHECKRESULT1(!result, "secp256k1_frost_enrollment_shares_gen failed", free(out));
+
+    jout = copy_bytes_to_java(penv, out, 32 * (n_ids + 1));
+    free(out);
+    return jout;
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_share_agg
+ * Signature: (J[[B[[B[B[IIIII[I)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1share_1agg(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jallshares, jobjectArray jhashes, jbyteArray jthreshpk, jintArray jids, jint jmyid, jint jnewid, jint jnparticipants, jint jthreshold, jintArray jmismatchid)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char sigma32[32];
+    unsigned char* all_shares = NULL;
+    unsigned char* hashes = NULL;
+    secp256k1_pubkey thresh_pk;
+    uint32_t* ids = NULL;
+    uint32_t mismatch_id = UINT32_MAX;
+    size_t n_ids = 0, n_shares = 0, n_hashes = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jallshares == NULL, "enrollment shares cannot be null");
+    CHECKRESULT(jhashes == NULL, "parameters hashes cannot be null");
+    CHECKRESULT(jids == NULL, "helper ids cannot be null");
+    CHECKRESULT(jmismatchid == NULL, "mismatch id cannot be null");
+    CHECKRESULT((*penv)->GetArrayLength(penv, jmismatchid) != 1, "mismatch id must be a single-element array");
+    CHECKRESULT(jmyid < 0, "own id cannot be negative");
+    CHECKRESULT(jnewid < 0, "target id cannot be negative");
+    CHECKRESULT(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants");
+    CHECKRESULT(jthreshold < 2 || jthreshold > jnparticipants, "invalid threshold");
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return NULL;
+
+    ids = get_signer_ids(penv, jids, &n_ids);
+    if (ids == NULL) return NULL;
+    all_shares = get_flat32(penv, jallshares, &n_shares, "enrollment share");
+    CHECKRESULT1(all_shares == NULL, "enrollment shares could not be read", free(ids));
+    hashes = get_flat32(penv, jhashes, &n_hashes, "parameters hash");
+    CHECKRESULT1(hashes == NULL, "parameters hashes could not be read", free(ids); free(all_shares));
+    CHECKRESULT1(n_shares != n_ids || n_hashes != n_ids, "shares and hashes counts must match the helper ids count", free(ids); free(all_shares); free(hashes));
+
+    result = secp256k1_frost_enrollment_share_agg(ctx, sigma32, &mismatch_id, all_shares, hashes, &thresh_pk, ids, n_ids, (uint32_t)jmyid, (uint32_t)jnewid, (size_t)jnparticipants, (uint32_t)jthreshold);
+    free(ids);
+    free(all_shares);
+    free(hashes);
+
+    /* A failure that names a helper is a protocol fault, reported through mismatch_id; anything else
+     * is an invalid argument and raises, matching how the rest of these bindings behave. */
+    CHECKRESULT(!result && mismatch_id == UINT32_MAX, "secp256k1_frost_enrollment_share_agg failed");
+    set_fault_index(penv, jmismatchid, result ? UINT32_MAX : mismatch_id);
+
+    return copy_bytes_to_java(penv, sigma32, sizeof(sigma32));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_pubshare_derive
+ * Signature: (J[[B[IIII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1pubshare_1derive(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jpubshares, jintArray jids, jint jnewid, jint jnparticipants, jint jthreshold)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char out65[65];
+    secp256k1_pubkey new_pubshare;
+    secp256k1_pubkey* pubshares = NULL;
+    uint32_t* ids = NULL;
+    size_t n_ids = 0, n_pubshares = 0, size;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jpubshares == NULL, "public shares cannot be null");
+    CHECKRESULT(jids == NULL, "helper ids cannot be null");
+    CHECKRESULT(jnewid < 0, "target id cannot be negative");
+    CHECKRESULT(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants");
+    CHECKRESULT(jthreshold < 2 || jthreshold > jnparticipants, "invalid threshold");
+
+    ids = get_signer_ids(penv, jids, &n_ids);
+    if (ids == NULL) return NULL;
+    pubshares = get_pubshares(penv, ctx, jpubshares, &n_pubshares);
+    CHECKRESULT1(pubshares == NULL, "public shares could not be read", free(ids));
+    CHECKRESULT1(n_pubshares != n_ids, "public shares count must match the helper ids count", free(ids); free(pubshares));
+
+    result = secp256k1_frost_enrollment_pubshare_derive(ctx, &new_pubshare, pubshares, ids, n_ids, (uint32_t)jnewid, (size_t)jnparticipants, (uint32_t)jthreshold);
+    free(ids);
+    free(pubshares);
+    CHECKRESULT(!result, "secp256k1_frost_enrollment_pubshare_derive failed");
+
+    size = sizeof(out65);
+    result = secp256k1_ec_pubkey_serialize(ctx, out65, &size, &new_pubshare, SECP256K1_EC_UNCOMPRESSED);
+    CHECKRESULT(!result, "secp256k1_ec_pubkey_serialize failed");
+
+    return copy_bytes_to_java(penv, out65, sizeof(out65));
+}
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_secshare_gen
+ * Signature: (J[[B[B[IIII[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1secshare_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jobjectArray jsigmas, jbyteArray jthreshpk, jintArray jids, jint jnewid, jint jnparticipants, jint jthreshold, jbyteArray jexpectedhash, jbyteArray jexpectedpubshare)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    unsigned char secshare32[32], expected_hash32[32];
+    unsigned char* sigmas = NULL;
+    secp256k1_pubkey thresh_pk, expected_pubshare;
+    uint32_t* ids = NULL;
+    size_t n_ids = 0, n_sigmas = 0;
+    int result = 0;
+
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jsigmas == NULL, "aggregated shares cannot be null");
+    CHECKRESULT(jids == NULL, "helper ids cannot be null");
+    CHECKRESULT(jnewid < 0, "target id cannot be negative");
+    CHECKRESULT(jnparticipants < 1 || jnparticipants > SECP256K1_FROST_MAX_PARTICIPANTS, "invalid number of participants");
+    CHECKRESULT(jthreshold < 2 || jthreshold > jnparticipants, "invalid threshold");
+    if (!get_pubkey(penv, ctx, jthreshpk, &thresh_pk)) return NULL;
+    /* Both checks are optional: a null argument skips the corresponding comparison. */
+    if (jexpectedhash != NULL && !get_bytes32(penv, jexpectedhash, expected_hash32, "expected parameters hash")) return NULL;
+    if (jexpectedpubshare != NULL && !get_pubkey(penv, ctx, jexpectedpubshare, &expected_pubshare)) return NULL;
+
+    ids = get_signer_ids(penv, jids, &n_ids);
+    if (ids == NULL) return NULL;
+    sigmas = get_flat32(penv, jsigmas, &n_sigmas, "aggregated share");
+    CHECKRESULT1(sigmas == NULL, "aggregated shares could not be read", free(ids));
+    CHECKRESULT1(n_sigmas != n_ids, "aggregated shares count must match the helper ids count", free(ids); free(sigmas));
+
+    result = secp256k1_frost_enrollment_secshare_gen(ctx, secshare32, sigmas, &thresh_pk, ids, n_ids, (uint32_t)jnewid, (size_t)jnparticipants, (uint32_t)jthreshold,
+                                                     jexpectedhash != NULL ? expected_hash32 : NULL,
+                                                     jexpectedpubshare != NULL ? &expected_pubshare : NULL);
+    free(ids);
+    free(sigmas);
+    CHECKRESULT(!result, "secp256k1_frost_enrollment_secshare_gen failed");
+
+    return copy_bytes_to_java(penv, secshare32, sizeof(secshare32));
 }
