@@ -22,7 +22,7 @@ kotlin {
 }
 
 dependencies {
-    api(rootProject)
+    api(project(":"))
 }
 
 val generateHeaders by tasks.registering(JavaCompile::class) { ->

@@ -48,7 +48,7 @@ kotlin {
     sourceSets {
         val commonMain by getting {
             dependencies {
-                implementation(rootProject)
+                implementation(project(":"))
             }
         }
         val commonTest by getting {
