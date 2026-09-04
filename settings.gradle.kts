@@ -5,7 +5,7 @@ pluginManagement {
     }
     resolutionStrategy {
         eachPlugin {
-            if (requested.id.namespace == "com.android" || requested.id.name == "kotlin-android-extensions") {
+            if (requested.id.namespace == "com.android") {
                 useModule("com.android.tools.build:gradle:9.4.0")
             }
         }
@@ -35,8 +35,8 @@ include(
 )
 
 if (!skipAndroid) {
-    print("building android library")
+    println("building android library")
     include(":jni:android")
 } else {
-    print("skipping android build")
+    println("skipping android build")
 }

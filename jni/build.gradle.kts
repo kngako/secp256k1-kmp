@@ -31,11 +31,13 @@ val generateHeaders by tasks.registering(JavaCompile::class) { ->
     destinationDirectory.set(layout.buildDirectory.dir("generated/jni"))
     source = sourceSets["main"].java
     options.compilerArgs = listOf(
-        "-h", layout.buildDirectory.dir("generated./jni").get().asFile.absolutePath,
-        "-d", layout.buildDirectory.dir("generated./jni-tmp").get().asFile.absolutePath
+        "-h", layout.buildDirectory.dir("generated/jni").get().asFile.absolutePath,
+        "-d", layout.buildDirectory.dir("generated/jni-tmp").get().asFile.absolutePath
     )
     doLast {
-        layout.buildDirectory.dir("generated/jni-tmp").get().asFile.delete()
+        // javac needs a -d for the class files it emits alongside the headers, and those are
+        // throwaway. File.delete() only removes an empty directory, so it silently did nothing.
+        layout.buildDirectory.dir("generated/jni-tmp").get().asFile.deleteRecursively()
     }
 }
 
