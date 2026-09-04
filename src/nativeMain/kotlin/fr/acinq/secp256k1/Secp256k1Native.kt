@@ -1148,6 +1148,11 @@ public object Secp256k1Native : Secp256k1 {
         require(pmsgs1.size == hostpubkeys33.size) { "participant messages count must match host public keys count" }
         require(threshold in 1..hostpubkeys33.size)
         require(hostpubkeys33.size <= Secp256k1.CHILLDKG_MAX_PARTICIPANTS)
+        // The C function takes no per-message length: it derives the expected size from n and t and
+        // reads that many bytes from each pmsg1, so a short one is read out of bounds. The JNI glue
+        // enforces this through get_msg_ptrs; without it here the two backends disagree.
+        val pmsg1Len = secp256k1_chilldkg_participant_msg1_len(hostpubkeys33.size.convert(), threshold.toUInt()).toInt()
+        pmsgs1.forEach { require(it.size == pmsg1Len) { "participant message must be $pmsg1Len bytes for this session" } }
         memScoped {
             val nHostpubkeys = flatHostpubkeys33(hostpubkeys33)
             val nPmsgs1 = pmsgs1.map { toNat(it) }.toCValues()
@@ -1164,6 +1169,15 @@ public object Secp256k1Native : Secp256k1 {
         require(hostseckey32.size == 32)
         require(state1.size == Secp256k1.CHILLDKG_PARTICIPANT_STATE1_SIZE)
         require(auxRand32.size == 32)
+        // The C function takes no cmsg1 length: it derives the expected size from the t and n recorded
+        // in state1 and reads exactly that many bytes, so a short message is read out of bounds. Both
+        // are big-endian at offsets 4 and 8, after the magic.
+        // Keep in sync with native/secp256k1/src/modules/chilldkg/main_impl.h.
+        val stateT = ((state1[4].toInt() and 0xff) shl 24) or ((state1[5].toInt() and 0xff) shl 16) or ((state1[6].toInt() and 0xff) shl 8) or (state1[7].toInt() and 0xff)
+        val stateN = ((state1[8].toInt() and 0xff) shl 24) or ((state1[9].toInt() and 0xff) shl 16) or ((state1[10].toInt() and 0xff) shl 8) or (state1[11].toInt() and 0xff)
+        require(cmsg1.size == secp256k1_chilldkg_coordinator_msg1_len(stateN.convert(), stateT.toUInt()).toInt()) {
+            "coordinator message has the wrong length for this session"
+        }
         memScoped {
             val nState1 = allocChilldkgState1(state1)
             val nState2 = alloc<secp256k1_chilldkg_participant_state2>()
@@ -1180,6 +1194,12 @@ public object Secp256k1Native : Secp256k1 {
         require(state.size == Secp256k1.CHILLDKG_COORDINATOR_STATE_SIZE)
         require(pmsgs2.isNotEmpty())
         pmsgs2.forEach { require(it.size == 64) { "participant message must be 64 bytes" } }
+        // The C function reads the participant count from the state, not from this array, and writes
+        // 33*n and 64*n bytes of output accordingly. A mismatch corrupts the heap, so it is rejected
+        // here rather than passed on. n is at offset 8: 4-byte magic, then big-endian t, then n.
+        // Keep in sync with native/secp256k1/src/modules/chilldkg/main_impl.h.
+        val stateParticipants = ((state[8].toInt() and 0xff) shl 24) or ((state[9].toInt() and 0xff) shl 16) or ((state[10].toInt() and 0xff) shl 8) or (state[11].toInt() and 0xff)
+        require(pmsgs2.size == stateParticipants) { "participant messages count must match the coordinator state" }
         require(threshold in 1..pmsgs2.size)
         memScoped {
             val nState = allocChilldkgCoordinatorState(state)

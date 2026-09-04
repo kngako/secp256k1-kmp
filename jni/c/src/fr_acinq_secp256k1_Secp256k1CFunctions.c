@@ -2142,6 +2142,16 @@ JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1ch
     CHECKMAGIC(state1.data, CHILLDKG_PARTICIPANT_STATE1_MAGIC, "invalid participant state1");
     if (!get_var_bytes(penv, jcmsg1, &cmsg1, &cmsg1_len, "coordinator message")) return 0;
     CHECKRESULT1(cmsg1 == NULL || cmsg1_len == 0, "coordinator message cannot be empty", free(cmsg1));
+    /* secp256k1_chilldkg_participant_step2 takes no cmsg1 length: it derives the expected size from
+     * the t and n in state1 and reads exactly that many bytes, so a short message is read out of
+     * bounds. t and n are at offsets 4 and 8, after the 4-byte magic, both big-endian.
+     * Keep in sync with native/secp256k1/src/modules/chilldkg/main_impl.h. */
+    {
+        uint32_t st = ((uint32_t)state1.data[4] << 24) | ((uint32_t)state1.data[5] << 16) | ((uint32_t)state1.data[6] << 8) | (uint32_t)state1.data[7];
+        uint32_t sn = ((uint32_t)state1.data[8] << 24) | ((uint32_t)state1.data[9] << 16) | ((uint32_t)state1.data[10] << 8) | (uint32_t)state1.data[11];
+        CHECKRESULT1(cmsg1_len != secp256k1_chilldkg_coordinator_msg1_len((size_t)sn, st),
+                     "coordinator message has the wrong length for this session", free(cmsg1));
+    }
 
     if (jstate2out == NULL || (*penv)->GetArrayLength(penv, jstate2out) != fr_acinq_secp256k1_Secp256k1CFunctions_SECP256K1_CHILLDKG_PARTICIPANT_STATE2_SIZE) {
         free(cmsg1);
@@ -2196,6 +2206,14 @@ JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1ch
 
     CHECKRESULT(jpmsgs2 == NULL, "participant messages cannot be null");
     if (!get_msg_ptrs(penv, jpmsgs2, 64, &pmsgs2, &n, "participant message")) return 0;
+    /* secp256k1_chilldkg_coordinator_finalize takes no participant count: it reads n from the
+     * state and dereferences exactly that many pmsgs2 entries, writing 33*n and 64*n bytes of
+     * output. Sizing any of that from the caller's array length instead corrupts the heap when
+     * the two disagree, so the count is checked against the state before anything is allocated.
+     * n sits at offset 8 of the state, after the 4-byte magic and the big-endian t.
+     * Keep in sync with native/secp256k1/src/modules/chilldkg/main_impl.h. */
+    CHECKRESULT1(n != (size_t)(((uint32_t)state.data[8] << 24) | ((uint32_t)state.data[9] << 16) | ((uint32_t)state.data[10] << 8) | (uint32_t)state.data[11]),
+                 "participant messages count must match the coordinator state", free(pmsgs2[0]); free(pmsgs2));
     CHECKRESULT1(jthreshold < 1 || (size_t)jthreshold > n, "invalid threshold", free(pmsgs2[0]); free(pmsgs2));
 
     cmsg2_len = secp256k1_chilldkg_coordinator_msg2_len(n);

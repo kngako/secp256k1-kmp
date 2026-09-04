@@ -512,6 +512,12 @@ public object Secp256k1Jni : Secp256k1 {
         require(state.size == Secp256k1.CHILLDKG_COORDINATOR_STATE_SIZE) { "invalid coordinator state size" }
         require(pmsgs2.isNotEmpty()) { "participant messages must not be empty" }
         pmsgs2.forEach { require(it.size == 64) { "participant message must be 64 bytes" } }
+        // The C function reads the participant count from the state, not from this array, and writes
+        // 33*n and 64*n bytes of output accordingly. A mismatch corrupts the heap, so it is rejected
+        // here rather than passed on. n is at offset 8: 4-byte magic, then big-endian t, then n.
+        // Keep in sync with native/secp256k1/src/modules/chilldkg/main_impl.h.
+        val stateParticipants = ((state[8].toInt() and 0xff) shl 24) or ((state[9].toInt() and 0xff) shl 16) or ((state[10].toInt() and 0xff) shl 8) or (state[11].toInt() and 0xff)
+        require(pmsgs2.size == stateParticipants) { "participant messages count must match the coordinator state" }
         require(threshold in 1..pmsgs2.size) { "invalid threshold" }
         val n = pmsgs2.size
         val cmsg2 = ByteArray(64 * n)
