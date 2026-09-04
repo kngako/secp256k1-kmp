@@ -24,7 +24,7 @@ dependencies {
     implementation(project(":jni:jvm"))
 }
 
-val copyJni by tasks.registering(Sync::class) {
+val copyJni = tasks.register<Sync>("copyJni") {
     ->
     onlyIf { org.gradle.internal.os.OperatingSystem.current().isWindows }
     dependsOn(":jni:jvm:buildNativeHost")

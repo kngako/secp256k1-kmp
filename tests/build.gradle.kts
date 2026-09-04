@@ -46,12 +46,12 @@ kotlin {
     applyDefaultHierarchyTemplate()
 
     sourceSets {
-        val commonMain by getting {
+        getByName("commonMain") {
             dependencies {
                 implementation(project(":"))
             }
         }
-        val commonTest by getting {
+        getByName("commonTest") {
             dependencies {
                 implementation(kotlin("test-common"))
                 implementation(kotlin("test-annotations-common"))
@@ -60,12 +60,12 @@ kotlin {
             }
         }
         if (includeAndroid) {
-            val androidMain by getting {
+            getByName("androidMain") {
                 dependencies {
                     implementation(project(":jni:android"))
                 }
             }
-            val androidInstrumentedTest by getting {
+            getByName("androidInstrumentedTest") {
                 dependencies {
                     implementation(kotlin("test-junit"))
                     implementation("androidx.test.ext:junit:1.3.0")

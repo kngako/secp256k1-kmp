@@ -18,8 +18,7 @@ val jniCSources = fileTree(rootProject.file("jni/c")) {
     include("src/**", "headers/**")
 }
 
-val buildNativeHost by tasks.registering(Exec::class) {
-    ->
+val buildNativeHost = tasks.register<Exec>("buildNativeHost") {
     group = "build"
     dependsOn(":jni:generateHeaders")
     dependsOn(":native:buildSecp256k1Host")
@@ -40,8 +39,7 @@ val buildNativeHost by tasks.registering(Exec::class) {
     commandLine(bash, "build.sh")
 }
 
-val buildNativeLinuxArm64 by tasks.registering(Exec::class) {
-    ->
+val buildNativeLinuxArm64 = tasks.register<Exec>("buildNativeLinuxArm64") {
     onlyIf { org.gradle.internal.os.OperatingSystem.current().isLinux }
     group = "build"
     dependsOn(":jni:generateHeaders")

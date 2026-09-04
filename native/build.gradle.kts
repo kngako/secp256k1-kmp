@@ -109,7 +109,7 @@ if (includeAndroid) {
     createBuildSecp256k1Android("armeabi-v7a")
 }
 
-val clean by tasks.registering {
+val clean = tasks.register("clean") {
     group = "build"
     doLast {
         delete(projectDir.resolve("build"))

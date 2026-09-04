@@ -24,7 +24,7 @@ dependencies {
     implementation(project(":jni:jvm"))
 }
 
-val copyJni by tasks.registering(Sync::class) {
+val copyJni = tasks.register<Sync>("copyJni") {
     ->
     onlyIf { org.gradle.internal.os.OperatingSystem.current().isLinux }
     dependsOn(":jni:jvm:buildNativeHost")
@@ -32,7 +32,7 @@ val copyJni by tasks.registering(Sync::class) {
     into(layout.buildDirectory.dir("jniResources/fr/acinq/secp256k1/jni/native/linux-x86_64"))
 }
 
-val copyJniArm64 by tasks.registering(Sync::class) {
+val copyJniArm64 = tasks.register<Sync>("copyJniArm64") {
     ->
     onlyIf { org.gradle.internal.os.OperatingSystem.current().isLinux }
     dependsOn(":jni:jvm:buildNativeLinuxArm64")

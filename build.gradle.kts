@@ -37,8 +37,6 @@ val currentOs = OperatingSystem.current()
 kotlin {
     explicitApi()
 
-    val commonMain by sourceSets.getting
-
     jvm {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_1_8)
@@ -54,14 +52,14 @@ kotlin {
 
     fun KotlinNativeTarget.secp256k1CInterop(target: String) {
         compilations["main"].cinterops {
-            val libsecp256k1 by creating {
+            create("libsecp256k1") {
                 includeDirs.headerFilterOnly(project.file("native/secp256k1/include/"))
                 tasks[interopProcessingTaskName].dependsOn(":native:buildSecp256k1${target.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }}")
             }
         }
     }
 
-    val nativeMain by sourceSets.creating
+    sourceSets.create("nativeMain")
 
     linuxX64 {
         secp256k1CInterop("host")
@@ -193,7 +191,7 @@ allprojects {
                 }
             }
 
-            val deleteDokkaOutputDir by tasks.register<Delete>("deleteDokkaOutputDirectory") {
+            val deleteDokkaOutputDir = tasks.register<Delete>("deleteDokkaOutputDirectory") {
                 delete(dokkaOutputDir)
             }
 

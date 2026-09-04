@@ -25,7 +25,7 @@ dependencies {
     api(project(":"))
 }
 
-val generateHeaders by tasks.registering(JavaCompile::class) { ->
+val generateHeaders = tasks.register<JavaCompile>("generateHeaders") {
     group = "build"
     classpath = sourceSets["main"].compileClasspath
     destinationDirectory.set(layout.buildDirectory.dir("generated/jni"))
