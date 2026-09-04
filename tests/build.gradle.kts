@@ -87,7 +87,7 @@ if (includeAndroid) {
         namespace = "fr.acinq.secp256k1.tests"
 
         defaultConfig {
-            compileSdk = 31
+            compileSdk = 36
             minSdk = 21
             testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         }

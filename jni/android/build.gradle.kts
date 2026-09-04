@@ -36,7 +36,7 @@ android {
     namespace = "fr.acinq.secp256k1.jni"
 
     defaultConfig {
-        compileSdk = 35
+        compileSdk = 36
         minSdk = 21
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
