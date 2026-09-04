@@ -16,6 +16,18 @@ kotlin {
     }
 }
 
+// AGP 9 registers a Dokka source set per Android variant - main, release, debug, plus the test,
+// androidTest, unitTest and testFixtures ones - and several of them share src/main/java. Dokka
+// refuses to generate when one file belongs to two modules ("Source sets 'AndroidJVM' and
+// 'AndroidJVM' have the common source roots"), so document only the published API.
+dokka {
+    dokkaSourceSets {
+        configureEach {
+            suppress.set(name != "main")
+        }
+    }
+}
+
 dependencies {
     api(project(":jni"))
 }
