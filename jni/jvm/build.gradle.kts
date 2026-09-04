@@ -10,6 +10,14 @@ plugins {
 val currentOs = org.gradle.internal.os.OperatingSystem.current()
 val bash = if (currentOs.isWindows) "bash.exe" else "bash"
 
+// build.sh compiles jni/c/src against the checked-in JNI headers and links the static library
+// produced by :native. Declaring only build.sh let a JNI-glue edit or a submodule bump leave a
+// stale libsecp256k1-jni.so in place, which surfaces at test time as UnsatisfiedLinkError on the
+// newly added natives rather than as a rebuild.
+val jniCSources = fileTree(rootProject.file("jni/c")) {
+    include("src/**", "headers/**")
+}
+
 val buildNativeHost by tasks.registering(Exec::class) {
     ->
     group = "build"
@@ -23,7 +31,8 @@ val buildNativeHost by tasks.registering(Exec::class) {
         else -> error("Unsupported OS $currentOs")
     }
 
-    inputs.files(projectDir.resolve("build.sh"))
+    inputs.files(projectDir.resolve("build.sh"), jniCSources).withPropertyName("jniSources")
+    inputs.files(rootProject.file("native/build/$target")).withPropertyName("secp256k1StaticLib")
     outputs.dir(layout.buildDirectory.dir(target))
 
     workingDir = projectDir
@@ -40,7 +49,8 @@ val buildNativeLinuxArm64 by tasks.registering(Exec::class) {
 
     val target = "linuxArm64"
 
-    inputs.files(projectDir.resolve("build.sh"))
+    inputs.files(projectDir.resolve("build.sh"), jniCSources).withPropertyName("jniSources")
+    inputs.files(rootProject.file("native/build/$target")).withPropertyName("secp256k1StaticLib")
     outputs.dir(layout.buildDirectory.dir(target))
 
     workingDir = projectDir

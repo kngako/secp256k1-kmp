@@ -11,6 +11,13 @@ val currentOs = OperatingSystem.current()
 val bash = "bash"
 val CMAKE_DEFAULT_OPTS="-DBUILD_SHARED_LIBS=OFF -DSECP256K1_ENABLE_MODULE_ECDH=ON -DSECP256K1_ENABLE_MODULE_MUSIG=ON -DSECP256K1_ENABLE_MODULE_FROST=ON -DSECP256K1_ENABLE_MODULE_CHILLDKG=ON -DSECP256K1_ENABLE_MODULE_ICEBERG=ON -DSECP256K1_ENABLE_MODULE_PREFRACTAL=ON -DSECP256K1_ENABLE_MODULE_RECOVERY=ON -DSECP256K1_ENABLE_MODULE_SCHNORRSIG=ON -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_CTIME_TESTS=OFF -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF -DSECP256K1_BUILD_TESTS=OFF"
 
+// The wrapper scripts are only the entry point. The real inputs are the submodule sources CMake
+// compiles and the flags it is configured with, so without these a submodule bump or a change to
+// CMAKE_DEFAULT_OPTS leaves the task UP-TO-DATE and Gradle serves a stale libsecp256k1.a.
+val secp256k1Sources = fileTree(projectDir.resolve("secp256k1")) {
+    include("CMakeLists.txt", "cmake/**", "include/**", "src/**")
+}
+
 val buildSecp256k1 = tasks.register("buildSecp256k1") {
     group = "build"
     dependsOn("buildSecp256k1Host")
@@ -26,7 +33,8 @@ tasks.register<Exec>("buildSecp256k1Host") {
         else -> error("Unsupported OS $currentOs")
     }
 
-    inputs.files(projectDir.resolve("build.sh"))
+    inputs.files(projectDir.resolve("build.sh"), secp256k1Sources)
+    inputs.property("cmakeOpts", CMAKE_DEFAULT_OPTS)
     outputs.dir(projectDir.resolve("build/$target"))
 
     workingDir = projectDir
@@ -44,7 +52,8 @@ tasks.register<Exec>("buildSecp256k1LinuxArm64") {
 
     val target = "linuxArm64"
 
-    inputs.files(projectDir.resolve("build.sh"))
+    inputs.files(projectDir.resolve("build.sh"), projectDir.resolve("toolchain-aarch64.cmake"), secp256k1Sources)
+    inputs.property("cmakeOpts", CMAKE_DEFAULT_OPTS)
     outputs.dir(projectDir.resolve("build/$target"))
 
     workingDir = projectDir
@@ -58,7 +67,8 @@ tasks.register<Exec>("buildSecp256k1Ios") {
 
     onlyIf { currentOs.isMacOsX }
 
-    inputs.files(projectDir.resolve("build-ios.sh"))
+    inputs.files(projectDir.resolve("build-ios.sh"), projectDir.resolve("ios.toolchain.cmake"), secp256k1Sources)
+    inputs.property("cmakeOpts", CMAKE_DEFAULT_OPTS)
     outputs.dir(projectDir.resolve("build/ios"))
 
     workingDir = projectDir
@@ -80,7 +90,9 @@ if (includeAndroid) {
     fun createBuildSecp256k1Android(arch: String) = tasks.register<Exec>("buildSecp256k1Android$arch") {
         group = "build"
 
-        inputs.files(projectDir.resolve("build-android.sh"))
+        inputs.files(projectDir.resolve("build-android.sh"), secp256k1Sources)
+        inputs.property("cmakeOpts", CMAKE_DEFAULT_OPTS)
+        inputs.property("arch", arch)
         outputs.dir(projectDir.resolve("build/android/$arch"))
 
         workingDir = projectDir
