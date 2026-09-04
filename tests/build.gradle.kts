@@ -83,7 +83,7 @@ kotlin {
 }
 
 if (includeAndroid) {
-    extensions.configure<com.android.build.gradle.LibraryExtension>("android") {
+    extensions.configure<com.android.build.api.dsl.LibraryExtension>("android") {
         namespace = "fr.acinq.secp256k1.tests"
 
         defaultConfig {

@@ -6,7 +6,7 @@ pluginManagement {
     resolutionStrategy {
         eachPlugin {
             if (requested.id.namespace == "com.android" || requested.id.name == "kotlin-android-extensions") {
-                useModule("com.android.tools.build:gradle:8.13.2")
+                useModule("com.android.tools.build:gradle:9.4.0")
             }
         }
     }

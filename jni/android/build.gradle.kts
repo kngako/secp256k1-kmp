@@ -69,7 +69,10 @@ afterEvaluate {
                 from(components["release"])
                 val sourcesJar = tasks.register<Jar>("sourcesJar") {
                     archiveClassifier.set("sources")
-                    from(android.sourceSets["main"].java.srcDirs)
+                    // AGP 9 decorates the source-set types, so android.sourceSets["main"].java no
+                    // longer casts to the legacy interface. The directory is fixed for this module,
+                    // so name it directly rather than going through the DSL.
+                    from(projectDir.resolve("src/main/java"))
                 }
                 artifact(sourcesJar)
             }
