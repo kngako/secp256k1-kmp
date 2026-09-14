@@ -89,12 +89,43 @@ kotlin {
         secp256k1CInterop("ios")
     }
 
+    // The .def declares staticLibraries for every target, and the cinterop tool refuses to
+    // generate a klib while the archive is absent from libraryPaths. Off a linux host the linux
+    // archives are never built: buildSecp256k1LinuxArm64 is onlyIf(isLinux), and the linuxX64
+    // cinterop points at native/build/linux, which the host build only fills on linux. Nothing
+    // links a linux binary here -- compile and link tasks for the linux targets are disabled in
+    // the block below -- so a placeholder archive is enough. The cinterop klib it unlocks is
+    // what the IDE sync's cinterop commonization resolves for linuxMain; without this the sync
+    // fails with "cinterop file ... does not exist".
+    if (!currentOs.isLinux) {
+        val createLinuxStubStaticLibs = tasks.registering(Exec::class) {
+            val stub = layout.buildDirectory.dir("linuxStub").get().asFile
+            val linuxDirs = listOf("linux", "linuxArm64").map { projectDir.resolve("native/build/$it") }
+            commandLine(
+                "bash", "-c",
+                "set -e\n" +
+                    "mkdir -p \"$stub\" ${linuxDirs.joinToString(" ") { "\"$it\"" }}\n" +
+                    "echo 'void secp256k1_kmp_stub(void) {}' > \"$stub/stub.c\"\n" +
+                    "clang -c \"$stub/stub.c\" -o \"$stub/stub.o\"\n" +
+                    linuxDirs.joinToString("\n") { "[ -f \"$it/libsecp256k1.a\" ] || ar rcs \"$it/libsecp256k1.a\" \"$stub/stub.o\"" }
+            )
+        }
+        listOf("linuxX64", "linuxArm64").forEach { targetName ->
+            (targets.getByName(targetName) as KotlinNativeTarget).compilations["main"].cinterops.all {
+                tasks[interopProcessingTaskName].dependsOn(createLinuxStubStaticLibs)
+            }
+        }
+    }
+
     sourceSets.all {
         languageSettings.optIn("kotlin.RequiresOptIn")
     }
 }
 
-// Disable cross compilation
+// Disable cross compilation of the linux targets off a linux host: no klib compile, no
+// resources, no link, no publication. Cinterop processing is deliberately NOT disabled --
+// the cinterop klib only parses headers (the stub archives above satisfy the .def's
+// staticLibraries check), and the IDE sync resolves it for linuxMain regardless of host.
 allprojects {
     plugins.withId("org.jetbrains.kotlin.multiplatform") {
         afterEvaluate {
@@ -108,7 +139,6 @@ allprojects {
 
             configure(targets) {
                 compilations.all {
-                    cinterops.all { tasks[interopProcessingTaskName].enabled = false }
                     compileTaskProvider { enabled = false }
                     tasks[processResourcesTaskName].enabled = false
                 }
