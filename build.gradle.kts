@@ -98,7 +98,7 @@ kotlin {
     // what the IDE sync's cinterop commonization resolves for linuxMain; without this the sync
     // fails with "cinterop file ... does not exist".
     if (!currentOs.isLinux) {
-        val createLinuxStubStaticLibs = tasks.registering(Exec::class) {
+        val createLinuxStubStaticLibs = tasks.register<Exec>("createLinuxStubStaticLibs") {
             val stub = layout.buildDirectory.dir("linuxStub").get().asFile
             val linuxDirs = listOf("linux", "linuxArm64").map { projectDir.resolve("native/build/$it") }
             commandLine(
