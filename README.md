@@ -85,6 +85,27 @@ You can also specify the temporary directory where the library will be extracted
 
 Please have a look at unit tests, more samples will be added soon.
 
+### FROST enrollment and repair
+
+FROST enrollment grows a `(t, n)` group to `(t, n+1)` without changing its threshold public key or rerunning key generation. The same operation at an existing participant identifier repairs that participant's lost share without changing `n` or its public-share table. Two explicitly separated protocols are available:
+
+- The original `frostEnrollment...` functions implement full enrollment (version 1).
+- The `frostEnrollmentReduced...` functions implement reduced enrollment (version 2), recommended for new integrations. Reduced enrollment uses a triangular share matrix, a session-bound parameters hash and mandatory target-side verification. Full and reduced messages must not be mixed within a run.
+
+A reduced enrollment or repair run follows this sequence:
+
+1. The target creates a fresh 32-byte `sessionId32`. Every helper authorizes the exact session, group, participant count, threshold, target and helper set out of band.
+2. Each helper calls `frostEnrollmentReducedSharesGen` with fresh 32-byte randomness. It retains its own entry and sends entries only to helpers with larger participant identifiers, together with its parameters hash.
+3. Each helper calls `frostEnrollmentReducedShareAgg` over its triangular matrix column and sends the resulting sigma and parameters hash to the target.
+4. The expected public share is derived with `frostEnrollmentPubshareDerive`, or with `frostEnrollmentPubshareDeriveFromCommitments` when authenticated aggregate VSS commitments are available.
+5. The target calls `frostEnrollmentReducedSecshareGen` with one sigma and parameters hash from every helper and the mandatory expected public share.
+
+After enrollment, every participant must append the same derived public share, update `n` to `n+1`, validate the extended table with `frostThresholdInfoValidate`, and persist the transition atomically before signing. Repair leaves the group metadata unchanged. Transport, message deduplication, authorization, consensus and persistent state remain application responsibilities.
+
+Deltas and sigmas are additive shares of real secret shares and must use confidential, authenticated channels. The threshold public key and public shares or VSS commitments must be authenticated independently of helper messages. Commitment entries are 33-byte compressed points in ascending coefficient order; 33 zero bytes encode infinity for a zero nonconstant coefficient. The bindings wipe native scratch copies of consumed randomness, but do not wipe caller-provided Kotlin arrays.
+
+**Warning:** the underlying enrollment module is experimental and must not be used in production. In particular, the generalized reduced protocol with more helpers than the threshold requires independent review. See the [protocol notes](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/a04dc1edd71783990e1fcde648fa42ac5d03eefa/src/modules/frost_enrollment/frost_enrollment.md), [API contract](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/a04dc1edd71783990e1fcde648fa42ac5d03eefa/include/secp256k1_frost_enrollment.h), and [upstream example](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/a04dc1edd71783990e1fcde648fa42ac5d03eefa/examples/frost_enrollment.c) for the complete security contract. `FrostReducedEnrollmentTest` demonstrates the corresponding Kotlin call sequence.
+
 ## Building
 
 **secp256k1-kmp** is a [Kotlin Multiplatform](https://kotlinlang.org/docs/multiplatform.html) wrapper for Bitcoin Core's [secp256k1 library](https://github.com/bitcoin-core/secp256k1).

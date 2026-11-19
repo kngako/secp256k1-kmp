@@ -3,13 +3,13 @@ package fr.acinq.secp256k1
 import kotlin.test.*
 
 /**
- * FROST enrollment: turning a (t, n) group into a (t, n+1) one, and repairing a lost share, without
- * re-running key generation and without any helper revealing its secret share.
+ * Full (version 1) FROST enrollment: turning a (t, n) group into a (t, n+1) one, and repairing a lost
+ * share, without re-running key generation and without any helper revealing its secret share.
  *
- * The protocol is driven end to end rather than checked against fixed vectors, because what these
+ * The full protocol is driven end to end rather than checked against fixed vectors, because what these
  * bindings can get wrong is the marshalling of the two u-entry arrays whose own-slot conventions are
- * deliberately opposite, and the transposition between rounds 1.1 and 1.2. A vector would pin the C
- * module's arithmetic, which its own test suite already covers; driving the rounds pins the wiring.
+ * deliberately opposite, and the transposition between rounds 1.1 and 1.2. Reduced enrollment has fixed
+ * regression vectors in [FrostEnrollmentVectorsTest] and end-to-end tests in [FrostReducedEnrollmentTest].
  *
  * Runs on the JVM and on every native target: the two binding layers marshal these arguments
  * completely differently.

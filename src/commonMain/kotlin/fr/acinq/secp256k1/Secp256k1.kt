@@ -561,8 +561,9 @@ public interface Secp256k1 {
     public fun frostPartialSigAgg(session: ByteArray, psigs: Array<ByteArray>): ByteArray
 
     /**
-     * Compute the FROST enrollment parameters hash, which every party of an enrollment run computes for itself
-     * and compares against the ones it receives. Binding the threshold public key makes the hash identify a
+     * Compute the full (version 1) FROST enrollment parameters hash, which every party of an enrollment run computes
+     * for itself and compares against the ones it receives. New integrations should prefer the reduced (version 2)
+     * protocol, which binds a session identifier and requires target-side verification. Binding the threshold public key makes the hash identify a
      * group rather than a tuple of numbers: two unrelated groups that happen to share (t, n, ids, newId) produce
      * different hashes.
      *
@@ -586,7 +587,7 @@ public interface Secp256k1 {
     public fun frostEnrollmentParamsHash(threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int): ByteArray
 
     /**
-     * Round 1.1 of FROST enrollment: generate a helper's enrollment shares. Computes this helper's Lagrange-scaled
+     * Round 1.1 of full (version 1) FROST enrollment: generate a helper's enrollment shares. Computes this helper's Lagrange-scaled
      * contribution at the target identifier and splits it into u additive shares.
      *
      * The returned shares are aligned with [ids]: the entry at [myId]'s own position is kept locally and passed
@@ -617,7 +618,7 @@ public interface Secp256k1 {
     public fun frostEnrollmentSharesGen(sessionSecrand32: ByteArray, secshare32: ByteArray, threshPk: ByteArray, ids: UIntArray, myId: UInt, newId: UInt, nParticipants: Int, threshold: Int): Pair<Array<ByteArray>, ByteArray>
 
     /**
-     * Round 1.2 of FROST enrollment: check that every helper ran round 1.1 on the same parameters, and aggregate
+     * Round 1.2 of full (version 1) FROST enrollment: check that every helper ran round 1.1 on the same parameters, and aggregate
      * this helper's enrollment shares into the single value to send to the target participant.
      *
      * The two u-entry arrays are both aligned with [ids] but have deliberately opposite conventions for the
@@ -673,8 +674,9 @@ public interface Secp256k1 {
     public fun frostEnrollmentPubshareDerive(pubshares: Array<ByteArray>, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int): ByteArray
 
     /**
-     * Round 2 of FROST enrollment: derive the target participant's secret share from the values received from the
-     * helpers, checking the parameters hash and verifying the result against the expected public share.
+     * Round 2 of full (version 1) FROST enrollment: derive the target participant's secret share from the values received
+     * from the helpers, checking the parameters hash and verifying the result against the expected public share.
+     * New integrations should prefer [frostEnrollmentReducedSecshareGen], where these checks are mandatory.
      *
      * [expectedPubshare] is load-bearing: it is the only check that a helper contributed a correct value. Pass
      * null only if the resulting share is validated by other means.
