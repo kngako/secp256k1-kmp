@@ -293,6 +293,27 @@ public class Secp256k1CFunctions {
 
     public static native int secp256k1_chilldkg_participant_investigate(long ctx, byte[] invData, byte[] cinv, int[] faultIndexOut);
 
+    /* FROST share refresh. The session parameters cross the boundary as their serialization: params_serialize
+     * validates and serializes them, and every other function parses them again. Fault codes are chilldkg's;
+     * faultIndexOut[0] receives the faulty recipient's position, or -1. */
+    public static native byte[] secp256k1_frost_refresh_params_serialize(long ctx, byte[] thresh_pk33, byte[][] hostpubkeys33, byte[][] pubshares33, int threshold, int generation, int[] recipient_ids, byte[] refresh_id32);
+
+    public static native byte[] secp256k1_frost_refresh_params_hash(long ctx, byte[] params);
+
+    public static native byte[] secp256k1_frost_refresh_participant_step1(long ctx, byte[] hostseckey32, byte[] params, int participant_id, byte[] random32);
+
+    public static native int secp256k1_frost_refresh_coordinator_step1(long ctx, byte[][] pmsgs1, byte[] params, byte[] cmsg1Out, int[] faultIndexOut);
+
+    public static native int secp256k1_frost_refresh_participant_step2(long ctx, byte[] hostseckey32, byte[] secshare32, byte[] params, int participant_id, byte[] cmsg1, byte[] aux_rand32, byte[] newSecshare32Out, byte[] newPubshares33Out, byte[] sig64Out, int[] faultIndexOut);
+
+    public static native int secp256k1_frost_refresh_coordinator_finalize(long ctx, byte[] params, byte[] cmsg1, byte[][] pmsgs2, byte[] cmsg2Out, int[] faultIndexOut);
+
+    public static native int secp256k1_frost_refresh_participant_finalize(long ctx, byte[] params, byte[] cmsg1, byte[] cmsg2, byte[] recoveryOut, int[] faultIndexOut);
+
+    public static native int secp256k1_frost_refresh_participant_recover(long ctx, byte[] hostseckey32, byte[] secshare32, byte[] recovery, byte[] newSecshare32Out, byte[] newPubshares33Out, int[] participantIdOut);
+
+    public static native int secp256k1_frost_refresh_public_recover(long ctx, byte[] recovery, byte[] paramsOut, byte[] newPubshares33Out);
+
     /* Returns the n serialized shares concatenated (all shares of a group serialize to the same length). */
     public static native byte[] secp256k1_iceberg_shares_gen(long ctx, int n, int t, byte[] seed32);
 

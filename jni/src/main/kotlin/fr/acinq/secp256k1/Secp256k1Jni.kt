@@ -616,6 +616,111 @@ public object Secp256k1Jni : Secp256k1 {
         return ChilldkgRecoverResult(chilldkgFault(fault, faultIndex), hostseckey32?.let { secshare }, thresholdPubkey, pubshareList, hostpubkeyList, n, nAndThreshold[1])
     }
 
+    private fun refreshShape(params: ByteArray): FrostRefreshShape =
+        requireNotNull(FrostRefreshShape.of(params)) { "invalid refresh parameters" }
+
+    private fun split33(flat: ByteArray, n: Int): Array<ByteArray> = Array(n) { flat.copyOfRange(33 * it, 33 * it + 33) }
+
+    override fun frostRefreshParamsSerialize(threshPk: ByteArray, hostpubkeys33: Array<ByteArray>, pubshares33: Array<ByteArray>, threshold: Int, generation: UInt, recipientIds: UIntArray, refreshId32: ByteArray): ByteArray {
+        require(threshPk.size == 33) { "threshold public key must be 33 bytes" }
+        require(refreshId32.size == 32) { "refresh id must be 32 bytes" }
+        require(hostpubkeys33.size == pubshares33.size) { "public shares count must match host public keys count" }
+        hostpubkeys33.forEach { require(it.size == 33) { "host public key must be 33 bytes" } }
+        pubshares33.forEach { require(it.size == 33) { "public share must be 33 bytes" } }
+        require(generation <= Int.MAX_VALUE.toUInt()) { "generation out of range" }
+        return Secp256k1CFunctions.secp256k1_frost_refresh_params_serialize(Secp256k1Context.getContext(), threshPk, hostpubkeys33, pubshares33, threshold, generation.toInt(), recipientIds.toIntArray(), refreshId32)
+    }
+
+    override fun frostRefreshParamsHash(params: ByteArray): ByteArray {
+        refreshShape(params)
+        return Secp256k1CFunctions.secp256k1_frost_refresh_params_hash(Secp256k1Context.getContext(), params)
+    }
+
+    override fun frostRefreshParticipantStep1(hostseckey32: ByteArray, params: ByteArray, participantId: UInt, random32: ByteArray): ByteArray {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(random32.size == 32) { "random data must be 32 bytes" }
+        refreshShape(params)
+        return Secp256k1CFunctions.secp256k1_frost_refresh_participant_step1(Secp256k1Context.getContext(), hostseckey32, params, participantId.toInt(), random32)
+    }
+
+    override fun frostRefreshCoordinatorStep1(pmsgs1: Array<ByteArray>, params: ByteArray): FrostRefreshCoordinatorStep1Result {
+        val shape = refreshShape(params)
+        require(pmsgs1.size == shape.nRecipients) { "participant messages count must match the recipients" }
+        pmsgs1.forEach { require(it.size == shape.participantMsg1Len) { "participant message must be ${shape.participantMsg1Len} bytes for this session" } }
+        val cmsg1 = ByteArray(shape.coordinatorMsg1Len)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_frost_refresh_coordinator_step1(Secp256k1Context.getContext(), pmsgs1, params, cmsg1, faultIndex)
+        return FrostRefreshCoordinatorStep1Result(chilldkgFault(fault, faultIndex), cmsg1.takeIf { fault == ChilldkgFault.OK })
+    }
+
+    override fun frostRefreshParticipantStep2(hostseckey32: ByteArray, secshare32: ByteArray, params: ByteArray, participantId: UInt, cmsg1: ByteArray, auxRand32: ByteArray): FrostRefreshParticipantStep2Result {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        require(auxRand32.size == 32) { "auxiliary random data must be 32 bytes" }
+        val shape = refreshShape(params)
+        require(cmsg1.size == shape.coordinatorMsg1Len) { "coordinator message has the wrong length for this session" }
+        val newSecshare = ByteArray(32)
+        val newPubshares = ByteArray(33 * shape.nParticipants)
+        val sig64 = ByteArray(64)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_frost_refresh_participant_step2(Secp256k1Context.getContext(), hostseckey32, secshare32, params, participantId.toInt(), cmsg1, auxRand32, newSecshare, newPubshares, sig64, faultIndex)
+        return if (fault == ChilldkgFault.OK) {
+            FrostRefreshParticipantStep2Result(chilldkgFault(fault, faultIndex), newSecshare, split33(newPubshares, shape.nParticipants), sig64)
+        } else {
+            FrostRefreshParticipantStep2Result(chilldkgFault(fault, faultIndex), null, null, null)
+        }
+    }
+
+    override fun frostRefreshCoordinatorFinalize(params: ByteArray, cmsg1: ByteArray, pmsgs2: Array<ByteArray>): FrostRefreshFinalizeResult {
+        val shape = refreshShape(params)
+        require(cmsg1.size == shape.coordinatorMsg1Len) { "coordinator message has the wrong length for this session" }
+        require(pmsgs2.size == shape.nRecipients) { "participant messages count must match the recipients" }
+        pmsgs2.forEach { require(it.size == 64) { "participant message must be 64 bytes" } }
+        val cmsg2 = ByteArray(64 * shape.nRecipients)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_frost_refresh_coordinator_finalize(Secp256k1Context.getContext(), params, cmsg1, pmsgs2, cmsg2, faultIndex)
+        return FrostRefreshFinalizeResult(chilldkgFault(fault, faultIndex), cmsg2.takeIf { fault == ChilldkgFault.OK })
+    }
+
+    override fun frostRefreshParticipantFinalize(params: ByteArray, cmsg1: ByteArray, cmsg2: ByteArray): FrostRefreshFinalizeResult {
+        val shape = refreshShape(params)
+        require(cmsg1.size == shape.coordinatorMsg1Len) { "coordinator message has the wrong length for this session" }
+        require(cmsg2.size == 64 * shape.nRecipients) { "certificate has the wrong length for this session" }
+        val recovery = ByteArray(shape.recoveryLen)
+        val faultIndex = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_frost_refresh_participant_finalize(Secp256k1Context.getContext(), params, cmsg1, cmsg2, recovery, faultIndex)
+        return FrostRefreshFinalizeResult(chilldkgFault(fault, faultIndex), recovery.takeIf { fault == ChilldkgFault.OK })
+    }
+
+    override fun frostRefreshParticipantRecover(hostseckey32: ByteArray, secshare32: ByteArray, recovery: ByteArray): FrostRefreshRecoverResult {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        val shape = FrostRefreshShape.of(recovery)
+            ?: return FrostRefreshRecoverResult(ChilldkgFault(ChilldkgFault.INVALID_INPUT, null), null, null, null)
+        val newSecshare = ByteArray(32)
+        val newPubshares = ByteArray(33 * shape.nParticipants)
+        val participantId = IntArray(1)
+        val fault = Secp256k1CFunctions.secp256k1_frost_refresh_participant_recover(Secp256k1Context.getContext(), hostseckey32, secshare32, recovery, newSecshare, newPubshares, participantId)
+        return if (fault == ChilldkgFault.OK) {
+            FrostRefreshRecoverResult(ChilldkgFault(fault, null), newSecshare, split33(newPubshares, shape.nParticipants), participantId[0].toUInt())
+        } else {
+            FrostRefreshRecoverResult(ChilldkgFault(fault, null), null, null, null)
+        }
+    }
+
+    override fun frostRefreshPublicRecover(recovery: ByteArray): FrostRefreshPublicRecoverResult {
+        val shape = FrostRefreshShape.of(recovery)
+            ?: return FrostRefreshPublicRecoverResult(ChilldkgFault(ChilldkgFault.INVALID_INPUT, null), null, null)
+        val params = ByteArray(shape.serializedLen)
+        val newPubshares = ByteArray(33 * shape.nParticipants)
+        val fault = Secp256k1CFunctions.secp256k1_frost_refresh_public_recover(Secp256k1Context.getContext(), recovery, params, newPubshares)
+        return if (fault == ChilldkgFault.OK) {
+            FrostRefreshPublicRecoverResult(ChilldkgFault(fault, null), params, split33(newPubshares, shape.nParticipants))
+        } else {
+            FrostRefreshPublicRecoverResult(ChilldkgFault(fault, null), null, null)
+        }
+    }
+
     override fun chilldkgParticipantRecover(hostseckey32: ByteArray, recovery: ByteArray): ChilldkgRecoverResult = chilldkgRecover(hostseckey32, recovery)
 
     override fun chilldkgCoordinatorRecover(recovery: ByteArray): ChilldkgRecoverResult = chilldkgRecover(null, recovery)
