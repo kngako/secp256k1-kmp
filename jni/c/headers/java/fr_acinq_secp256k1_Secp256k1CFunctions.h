@@ -479,6 +479,46 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_pubshare_derive_from_commitments
+ * Signature: (J[B[[BII)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1pubshare_1derive_1from_1commitments
+  (JNIEnv *, jclass, jlong, jbyteArray, jobjectArray, jint, jint);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_reduced_params_hash
+ * Signature: (J[B[IIII[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1reduced_1params_1hash
+  (JNIEnv *, jclass, jlong, jbyteArray, jintArray, jint, jint, jint, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_reduced_shares_gen
+ * Signature: (J[B[B[B[IIIII[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1reduced_1shares_1gen
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jintArray, jint, jint, jint, jint, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_reduced_share_agg
+ * Signature: (J[[B[[B[B[IIIII[B[I)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1reduced_1share_1agg
+  (JNIEnv *, jclass, jlong, jobjectArray, jobjectArray, jbyteArray, jintArray, jint, jint, jint, jint, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_enrollment_reduced_secshare_gen
+ * Signature: (J[[B[[B[B[IIII[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1enrollment_1reduced_1secshare_1gen
+  (JNIEnv *, jclass, jlong, jobjectArray, jobjectArray, jbyteArray, jintArray, jint, jint, jint, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
  * Method:    secp256k1_frost_session_init
  * Signature: (J[B[I[[BII[B[B)[B
  */

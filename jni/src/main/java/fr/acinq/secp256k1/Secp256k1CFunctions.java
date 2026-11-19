@@ -238,6 +238,20 @@ public class Secp256k1CFunctions {
     /* `expected_params_hash32` and `expected_pubshare` are optional: pass null to skip the corresponding check. */
     public static native byte[] secp256k1_frost_enrollment_secshare_gen(long ctx, byte[][] sigmas32, byte[] thresh_pk, int[] ids, int new_id, int n_participants, int threshold, byte[] expected_params_hash32, byte[] expected_pubshare);
 
+    /* Commitments stay as raw 33-byte entries: 33 zero bytes encode infinity for a zero coefficient. */
+    public static native byte[] secp256k1_frost_enrollment_pubshare_derive_from_commitments(long ctx, byte[] thresh_pk, byte[][] commitments33, int new_id, int n_participants);
+
+    public static native byte[] secp256k1_frost_enrollment_reduced_params_hash(long ctx, byte[] thresh_pk, int[] ids, int new_id, int n_participants, int threshold, byte[] session_id32);
+
+    /* Returns the flattened result: the u triangular 32-byte shares followed by the 32-byte parameters hash. */
+    public static native byte[] secp256k1_frost_enrollment_reduced_shares_gen(long ctx, byte[] session_secrand32, byte[] secshare32, byte[] thresh_pk, int[] ids, int my_id, int new_id, int n_participants, int threshold, byte[] session_id32);
+
+    /* Uses the same sigma/mismatch_id result convention as full enrollment aggregation. */
+    public static native byte[] secp256k1_frost_enrollment_reduced_share_agg(long ctx, byte[][] all_shares32, byte[][] received_params_hashes32, byte[] thresh_pk, int[] ids, int my_id, int new_id, int n_participants, int threshold, byte[] session_id32, int[] mismatch_id);
+
+    /* Reduced round 2 requires one parameters hash per helper and a non-null expected public share. */
+    public static native byte[] secp256k1_frost_enrollment_reduced_secshare_gen(long ctx, byte[][] sigmas32, byte[][] received_params_hashes32, byte[] thresh_pk, int[] ids, int new_id, int n_participants, int threshold, byte[] session_id32, byte[] expected_pubshare);
+
     public static native byte[] secp256k1_frost_session_init(long ctx, byte[] aggnonce, int[] ids, byte[][] pubshares, int n_participants, int threshold, byte[] tweak_cache, byte[] msg);
 
     public static native byte[] secp256k1_frost_sign(long ctx, byte[] secnonce, byte[] secshare32, byte[] session, int[] ids, byte[][] pubshares, int my_id);

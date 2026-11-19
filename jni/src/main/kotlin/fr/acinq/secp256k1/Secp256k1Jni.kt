@@ -396,6 +396,55 @@ public object Secp256k1Jni : Secp256k1 {
         return Secp256k1CFunctions.secp256k1_frost_enrollment_secshare_gen(Secp256k1Context.getContext(), sigmas32, threshPk, ids.toIntArray(), newId.toInt(), nParticipants, threshold, expectedParamsHash32, expectedPubshare)
     }
 
+    override fun frostEnrollmentPubshareDeriveFromCommitments(threshPk: ByteArray, commitments33: Array<ByteArray>, newId: UInt, nParticipants: Int): ByteArray {
+        require(threshPk.size == 33 || threshPk.size == 65) { "threshold public key must be 33 or 65 bytes" }
+        requireEnrollmentTarget(newId, nParticipants)
+        require(commitments33.size in 2..nParticipants) { "commitment count must be between 2 and the number of participants" }
+        commitments33.forEach { require(it.size == 33) { "commitment must be 33 bytes" } }
+        return Secp256k1CFunctions.secp256k1_frost_enrollment_pubshare_derive_from_commitments(Secp256k1Context.getContext(), threshPk, commitments33, newId.toInt(), nParticipants)
+    }
+
+    override fun frostEnrollmentReducedParamsHash(threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray): ByteArray {
+        requireEnrollmentParams(threshPk, ids, newId, nParticipants, threshold)
+        require(sessionId32.size == 32) { "session id must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_frost_enrollment_reduced_params_hash(Secp256k1Context.getContext(), threshPk, ids.toIntArray(), newId.toInt(), nParticipants, threshold, sessionId32)
+    }
+
+    override fun frostEnrollmentReducedSharesGen(sessionSecrand32: ByteArray, secshare32: ByteArray, threshPk: ByteArray, ids: UIntArray, myId: UInt, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray): Pair<Array<ByteArray>, ByteArray> {
+        require(sessionSecrand32.size == 32) { "session randomness must be 32 bytes" }
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        requireEnrollmentParams(threshPk, ids, newId, nParticipants, threshold)
+        require(myId in ids) { "own id must be one of the helper ids" }
+        require(sessionId32.size == 32) { "session id must be 32 bytes" }
+        val out = Secp256k1CFunctions.secp256k1_frost_enrollment_reduced_shares_gen(Secp256k1Context.getContext(), sessionSecrand32, secshare32, threshPk, ids.toIntArray(), myId.toInt(), newId.toInt(), nParticipants, threshold, sessionId32)
+        val shares = Array(ids.size) { out.copyOfRange(32 * it, 32 * (it + 1)) }
+        return Pair(shares, out.copyOfRange(32 * ids.size, out.size))
+    }
+
+    override fun frostEnrollmentReducedShareAgg(allShares32: Array<ByteArray>, receivedParamsHashes32: Array<ByteArray>, threshPk: ByteArray, ids: UIntArray, myId: UInt, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray): FrostEnrollmentShareAggResult {
+        requireEnrollmentParams(threshPk, ids, newId, nParticipants, threshold)
+        require(myId in ids) { "own id must be one of the helper ids" }
+        require(allShares32.size == ids.size) { "shares count must match helper ids count" }
+        require(receivedParamsHashes32.size == ids.size) { "parameters hashes count must match helper ids count" }
+        allShares32.forEach { require(it.size == 32) { "enrollment share must be 32 bytes" } }
+        receivedParamsHashes32.forEach { require(it.size == 32) { "parameters hash must be 32 bytes" } }
+        require(sessionId32.size == 32) { "session id must be 32 bytes" }
+        val mismatchId = IntArray(1)
+        val sigma = Secp256k1CFunctions.secp256k1_frost_enrollment_reduced_share_agg(Secp256k1Context.getContext(), allShares32, receivedParamsHashes32, threshPk, ids.toIntArray(), myId.toInt(), newId.toInt(), nParticipants, threshold, sessionId32, mismatchId)
+        return enrollmentShareAggResult(sigma, mismatchId[0])
+    }
+
+    override fun frostEnrollmentReducedSecshareGen(sigmas32: Array<ByteArray>, receivedParamsHashes32: Array<ByteArray>, threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray, expectedPubshare: ByteArray): ByteArray {
+        requireEnrollmentParams(threshPk, ids, newId, nParticipants, threshold)
+        require(sigmas32.size == ids.size) { "aggregated shares count must match helper ids count" }
+        require(receivedParamsHashes32.size == ids.size) { "parameters hashes count must match helper ids count" }
+        sigmas32.forEach { require(it.size == 32) { "aggregated share must be 32 bytes" } }
+        receivedParamsHashes32.forEach { require(it.size == 32) { "parameters hash must be 32 bytes" } }
+        require(sessionId32.size == 32) { "session id must be 32 bytes" }
+        require(expectedPubshare.size == 33 || expectedPubshare.size == 65) { "expected public share must be 33 or 65 bytes" }
+        return Secp256k1CFunctions.secp256k1_frost_enrollment_reduced_secshare_gen(Secp256k1Context.getContext(), sigmas32, receivedParamsHashes32, threshPk, ids.toIntArray(), newId.toInt(), nParticipants, threshold, sessionId32, expectedPubshare)
+    }
+
     override fun prefractalPartialSigAgg(partialSigs: Array<ByteArray>, tweakCache: ByteArray): ByteArray {
         require(partialSigs.isNotEmpty()) { "partial signatures must not be empty" }
         partialSigs.forEach { require(it.size == 32) { "partial signature must be 32 bytes" } }
@@ -437,16 +486,20 @@ public object Secp256k1Jni : Secp256k1 {
 
     /* Enrollment argument validation, mirrored by the native backend. These reject up front what the C module
      * would otherwise reject through the illegal-argument callback, which aborts the process rather than raising. */
-    private fun requireEnrollmentIds(ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int) {
+    private fun requireEnrollmentTarget(newId: UInt, nParticipants: Int) {
         require(nParticipants in 1..Secp256k1.FROST_MAX_PARTICIPANTS) { "invalid number of participants" }
+        require(newId <= nParticipants.toUInt()) { "target id must be at most the number of participants" }
+        // newId == nParticipants is enrollment, which grows the group by one; anything smaller is a repair.
+        require(newId < nParticipants.toUInt() || nParticipants < Secp256k1.FROST_MAX_PARTICIPANTS) { "cannot enroll beyond the maximum number of participants" }
+    }
+
+    private fun requireEnrollmentIds(ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int) {
+        requireEnrollmentTarget(newId, nParticipants)
         require(threshold in 2..nParticipants) { "threshold must be between 2 and the number of participants" }
         require(ids.size in threshold..nParticipants) { "helper count must be between the threshold and the number of participants" }
         require(ids.distinct().size == ids.size) { "helper ids must be unique" }
         require(ids.all { it < nParticipants.toUInt() }) { "helper ids must be smaller than the number of participants" }
-        require(newId <= nParticipants.toUInt()) { "target id must be at most the number of participants" }
         require(newId !in ids) { "target id must not be one of the helper ids" }
-        // newId == nParticipants is enrollment, which grows the group by one; anything smaller is a repair.
-        require(newId < nParticipants.toUInt() || nParticipants < Secp256k1.FROST_MAX_PARTICIPANTS) { "cannot enroll beyond the maximum number of participants" }
     }
 
     private fun requireEnrollmentParams(threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int) {

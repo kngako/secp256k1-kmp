@@ -704,6 +704,104 @@ public interface Secp256k1 {
     public fun frostEnrollmentSecshareGen(sigmas32: Array<ByteArray>, threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int, expectedParamsHash32: ByteArray?, expectedPubshare: ByteArray?): ByteArray
 
     /**
+     * Derive a public share from an aggregate VSS commitment polynomial. [commitments33] contains the threshold
+     * commitments C[0], ..., C[t-1] in ascending coefficient order. Each entry is a 33-byte compressed public key,
+     * except that 33 zero bytes encode the point at infinity for a zero coefficient. C[0] must equal [threshPk].
+     *
+     * AUTHENTICATION: this arithmetic does not authenticate the commitments. [threshPk] and [commitments33] must
+     * come from group state authenticated independently of the enrollment helpers. Otherwise colluding helpers can
+     * supply a different polynomial with the same constant-term commitment.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in production.
+     *
+     * @param threshPk threshold public key of the group (33 or 65 bytes).
+     * @param commitments33 aggregate VSS commitments in ascending coefficient order; its size is the threshold.
+     * @param newId identifier of the participant receiving the share.
+     * @param nParticipants total number of participants n.
+     * @return the derived public share, in uncompressed 65-byte format.
+     */
+    public fun frostEnrollmentPubshareDeriveFromCommitments(threshPk: ByteArray, commitments33: Array<ByteArray>, newId: UInt, nParticipants: Int): ByteArray
+
+    /**
+     * Compute the version 2 reduced-enrollment parameters hash. This commits to the reduced-protocol domain,
+     * threshold public key, participant count, threshold, target identifier, sorted helper set and [sessionId32].
+     * It is incompatible with [frostEnrollmentParamsHash] by design: full and reduced messages must not be mixed.
+     *
+     * [sessionId32] must identify exactly one enrollment or repair request. It should be generated freshly by the
+     * target and authenticated by every helper as part of its authorization decision. It need not be secret.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in production.
+     * In particular, the generalized reduced protocol with more helpers than the threshold requires independent review.
+     *
+     * @param threshPk threshold public key of the group (33 or 65 bytes).
+     * @param ids identifiers of the u helpers, with the same constraints as [frostEnrollmentParamsHash].
+     * @param newId identifier of the participant receiving the share.
+     * @param nParticipants total number of participants n.
+     * @param threshold threshold t, at least 2 and at most [nParticipants].
+     * @param sessionId32 fresh 32-byte identifier for this enrollment or repair request.
+     * @return 32-byte reduced-enrollment parameters hash.
+     */
+    public fun frostEnrollmentReducedParamsHash(threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray): ByteArray
+
+    /**
+     * Round 1.1 of reduced enrollment: generate a helper's triangular share row. The helper's Lagrange-scaled
+     * contribution is split so that entries for larger participant identifiers are sent to those helpers, the entry
+     * at [myId] is retained locally, and entries for smaller identifiers are zero and have no message. Routing is
+     * determined by identifiers, never by array positions or by testing whether an entry is zero.
+     *
+     * With u helpers this sends u*(u-1)/2 helper-to-helper deltas instead of the full protocol's u*(u-1). The
+     * returned array nevertheless contains u 32-byte entries aligned with [ids]. Send each larger-identifier entry
+     * with the returned parameters hash, [myId] and the recipient identifier over a confidential and authenticated
+     * channel. Keep the own entry for [frostEnrollmentReducedShareAgg].
+     *
+     * [sessionSecrand32] must be fresh uniform randomness for every run; [sessionId32] does not replace it. Following
+     * the convention of [frostEnrollmentSharesGen], the wipe performed by libsecp256k1 is not propagated back to the
+     * caller's array: single use must be guaranteed by the caller.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in production.
+     *
+     * @return the u 32-byte triangular shares aligned with [ids], and the 32-byte reduced parameters hash.
+     */
+    public fun frostEnrollmentReducedSharesGen(sessionSecrand32: ByteArray, secshare32: ByteArray, threshPk: ByteArray, ids: UIntArray, myId: UInt, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray): Pair<Array<ByteArray>, ByteArray>
+
+    /**
+     * Round 1.2 of reduced enrollment: aggregate one triangular matrix column. [allShares32] contains the caller's
+     * retained entry and entries from lower-identifier helpers; entries from higher-identifier helpers must be zero.
+     * [receivedParamsHashes32] is read only for lower-identifier helpers: the own and higher-identifier slots are
+     * ignored and may be zero. Each read hash is compared with a freshly recomputed session-bound hash.
+     *
+     * On success, send the resulting sigma, the recomputed parameters hash and [myId] to the target over a
+     * confidential and authenticated channel. A parameters-hash mismatch, invalid scalar or nonzero structurally
+     * omitted share is reported as the identifier of the responsible helper, not its array index.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in production.
+     *
+     * @return the aggregated share to send to the target participant, or the identifier of the helper at fault.
+     * @throws Secp256k1Exception if the arguments are invalid, as opposed to a helper being at fault.
+     */
+    public fun frostEnrollmentReducedShareAgg(allShares32: Array<ByteArray>, receivedParamsHashes32: Array<ByteArray>, threshPk: ByteArray, ids: UIntArray, myId: UInt, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray): FrostEnrollmentShareAggResult
+
+    /**
+     * Round 2 of reduced enrollment: derive and verify the target secret share. The caller must establish exactly
+     * one sigma and parameters hash from every expected helper. Every entry of [receivedParamsHashes32] is checked
+     * against the hash recomputed from [threshPk], the parameter tuple and [sessionId32].
+     *
+     * [expectedPubshare] is REQUIRED and must come from authenticated group data, either through
+     * [frostEnrollmentPubshareDerive] or [frostEnrollmentPubshareDeriveFromCommitments]. The function succeeds only
+     * if the summed sigmas produce a nonzero scalar whose public key equals [expectedPubshare]. [threshPk] and the
+     * data used to derive [expectedPubshare] must be authenticated independently of the helpers' messages.
+     *
+     * After a successful enrollment, every participant must append the same expected public share to its table,
+     * update n to n+1 and validate the extended table with [frostThresholdInfoValidate]. Repair leaves the table and
+     * n unchanged. Transport, authorization, consensus and atomic persistent state updates remain caller responsibilities.
+     *
+     * WARNING: the underlying secp256k1 FROST enrollment module is experimental and must not be used in production.
+     *
+     * @return the participant's verified 32-byte secret share.
+     */
+    public fun frostEnrollmentReducedSecshareGen(sigmas32: Array<ByteArray>, receivedParamsHashes32: Array<ByteArray>, threshPk: ByteArray, ids: UIntArray, newId: UInt, nParticipants: Int, threshold: Int, sessionId32: ByteArray, expectedPubshare: ByteArray): ByteArray
+
+    /**
      * Compute the ChillDKG host public key of a participant. The host public key is the long-term cryptographic
      * identity of the participant in a DKG session.
      *
