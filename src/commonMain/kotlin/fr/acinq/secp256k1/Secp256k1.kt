@@ -1149,6 +1149,51 @@ public interface Secp256k1 {
      */
     public fun confederationAccessAnalyze(rpd: ByteArray): ConfederationAccess
 
+    /** Parse and validate a transition certificate. Null old descriptors are permitted only together for genesis. */
+    public fun confederationTransitionParse(input: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): ByteArray
+
+    /** Serialize a transition certificate, including its signature envelope. */
+    public fun confederationTransitionSerialize(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): ByteArray
+
+    /** Return the canonical transition size after full state validation, or 0. */
+    public fun confederationTransitionSerializedSize(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): Int
+
+    /** Return true for different authorized successors of the same state and sequence number. */
+    public fun confederationTransitionConflicts(first: ByteArray, second: ByteArray): Boolean
+
+    /** Hash the unsigned transition envelope. */
+    public fun confederationTransitionHash(transition: ByteArray): ByteArray
+
+    /** Validate sequence rules, required evidence, and host signatures. */
+    public fun confederationTransitionValidate(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): Boolean
+
+    /** Check that a certificate's predecessor is the currently accepted state. */
+    public fun confederationTransitionCheckSuccessor(transition: ByteArray, currentRpd: ByteArray, currentKsd: ByteArray): Boolean
+
+    /** Wrap a 32-byte secret scalar after checking its public share and role metadata. */
+    public fun confederationShareWrap(groupId: UInt, adminId: UInt, secshare32: ByteArray, ksd: ByteArray, rpd: ByteArray): ByteArray
+
+    /** Rebind a still-valid opaque share to current descriptors and return the rebound copy. */
+    public fun confederationShareRebind(share: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray
+
+    /** Validate an opaque share against current descriptors. */
+    public fun confederationShareValidate(share: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): Boolean
+
+    /** Issue an authenticated RecoveryPackage using a fresh 32-byte recovery nonce. */
+    public fun confederationRecoveryIssue(share: ByteArray, hostseckey32: ByteArray, ksd: ByteArray, rpd: ByteArray, operation: Int, transitionHash32: ByteArray, recoveryNonce32: ByteArray): ByteArray
+
+    /** Open a RecoveryPackage and rebind its scalar to current descriptors. */
+    public fun confederationRecoveryOpen(recovery: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray
+
+    /** Serialize an opaque RecoveryPackage to its 269-byte canonical encoding. */
+    public fun confederationRecoverySerialize(recovery: ByteArray): ByteArray
+
+    /** Return 269 for a structurally valid RecoveryPackage, or 0. */
+    public fun confederationRecoverySerializedSize(recovery: ByteArray): Int
+
+    /** Parse and authenticate a 269-byte RecoveryPackage. */
+    public fun confederationRecoveryParse(input: ByteArray, hostseckey32: ByteArray): ByteArray
+
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
         public fun get(): Secp256k1 = this
@@ -1191,6 +1236,7 @@ public interface Secp256k1 {
         public const val CONFEDERATION_RECOVERY_SIZE: Int = 269
         public const val CONFEDERATION_RPD_MAX_SERIALIZED_SIZE: Int = 10208
         public const val CONFEDERATION_KSD_MAX_SERIALIZED_SIZE: Int = 10929
+        public const val CONFEDERATION_TRANSITION_MAX_SERIALIZED_SIZE: Int = 62408
         public val CONFEDERATION_NO_SPECIFIC_ROLE: UInt = UInt.MAX_VALUE
         /*
          * libsecp256k1 tags each of its opaque musig2 objects with a 4-byte magic prefix and validates it

@@ -801,4 +801,113 @@ public object Secp256k1Jni : Secp256k1 {
         val access = Secp256k1CFunctions.secp256k1_confederation_access_analyze(Secp256k1Context.getContext(), rpd)
         return ConfederationAccess(access[0], access[1])
     }
+
+    private fun requireConfederationTransitionDescriptors(oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray) {
+        require((oldRpd == null) == (oldKsd == null)) { "old RPD and KSD must be supplied together" }
+        oldRpd?.let { require(it.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque old RPD size" } }
+        oldKsd?.let { require(it.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque old KSD size" } }
+        require(newRpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque new RPD size" }
+        require(newKsd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque new KSD size" }
+    }
+
+    override fun confederationTransitionParse(input: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): ByteArray {
+        require(input.isNotEmpty() && input.size <= Secp256k1.CONFEDERATION_TRANSITION_MAX_SERIALIZED_SIZE) { "invalid transition encoding size" }
+        requireConfederationTransitionDescriptors(oldRpd, oldKsd, newRpd, newKsd)
+        return Secp256k1CFunctions.secp256k1_confederation_transition_parse(Secp256k1Context.getContext(), input, oldRpd, oldKsd, newRpd, newKsd)
+    }
+
+    override fun confederationTransitionSerialize(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): ByteArray {
+        require(transition.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        requireConfederationTransitionDescriptors(oldRpd, oldKsd, newRpd, newKsd)
+        return Secp256k1CFunctions.secp256k1_confederation_transition_serialize(Secp256k1Context.getContext(), transition, oldRpd, oldKsd, newRpd, newKsd)
+    }
+
+    override fun confederationTransitionSerializedSize(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): Int {
+        require(transition.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        requireConfederationTransitionDescriptors(oldRpd, oldKsd, newRpd, newKsd)
+        return Secp256k1CFunctions.secp256k1_confederation_transition_serialized_size(Secp256k1Context.getContext(), transition, oldRpd, oldKsd, newRpd, newKsd)
+    }
+
+    override fun confederationTransitionConflicts(first: ByteArray, second: ByteArray): Boolean {
+        require(first.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        require(second.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        return Secp256k1CFunctions.secp256k1_confederation_transition_conflicts(Secp256k1Context.getContext(), first, second) == 1
+    }
+
+    override fun confederationTransitionHash(transition: ByteArray): ByteArray {
+        require(transition.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        return Secp256k1CFunctions.secp256k1_confederation_transition_hash(Secp256k1Context.getContext(), transition)
+    }
+
+    override fun confederationTransitionValidate(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): Boolean {
+        require(transition.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        requireConfederationTransitionDescriptors(oldRpd, oldKsd, newRpd, newKsd)
+        return Secp256k1CFunctions.secp256k1_confederation_transition_validate(Secp256k1Context.getContext(), transition, oldRpd, oldKsd, newRpd, newKsd) == 1
+    }
+
+    override fun confederationTransitionCheckSuccessor(transition: ByteArray, currentRpd: ByteArray, currentKsd: ByteArray): Boolean {
+        require(transition.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        require(currentRpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        require(currentKsd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_transition_check_successor(Secp256k1Context.getContext(), transition, currentRpd, currentKsd) == 1
+    }
+
+    override fun confederationShareWrap(groupId: UInt, adminId: UInt, secshare32: ByteArray, ksd: ByteArray, rpd: ByteArray): ByteArray {
+        require(groupId < Secp256k1.CONFEDERATION_MAX_GROUPS.toUInt()) { "invalid group id" }
+        require(adminId < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt()) { "invalid admin id" }
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_share_wrap(Secp256k1Context.getContext(), groupId.toInt(), adminId.toInt(), secshare32, ksd, rpd)
+    }
+
+    override fun confederationShareRebind(share: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray {
+        require(share.size == Secp256k1.CONFEDERATION_SHARE_SIZE) { "invalid opaque share size" }
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(currentKsd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(currentRpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_share_rebind(Secp256k1Context.getContext(), share, hostseckey32, currentKsd, currentRpd)
+    }
+
+    override fun confederationShareValidate(share: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): Boolean {
+        require(share.size == Secp256k1.CONFEDERATION_SHARE_SIZE) { "invalid opaque share size" }
+        require(currentKsd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(currentRpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_share_validate(Secp256k1Context.getContext(), share, currentKsd, currentRpd) == 1
+    }
+
+    override fun confederationRecoveryIssue(share: ByteArray, hostseckey32: ByteArray, ksd: ByteArray, rpd: ByteArray, operation: Int, transitionHash32: ByteArray, recoveryNonce32: ByteArray): ByteArray {
+        require(share.size == Secp256k1.CONFEDERATION_SHARE_SIZE) { "invalid opaque share size" }
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        require(operation in 0..7) { "invalid recovery operation" }
+        require(transitionHash32.size == 32) { "transition hash must be 32 bytes" }
+        require(recoveryNonce32.size == 32) { "recovery nonce must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_confederation_recovery_issue(Secp256k1Context.getContext(), share, hostseckey32, ksd, rpd, operation, transitionHash32, recoveryNonce32)
+    }
+
+    override fun confederationRecoveryOpen(recovery: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray {
+        require(recovery.size == Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE) { "invalid opaque recovery size" }
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(currentKsd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(currentRpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_recovery_open(Secp256k1Context.getContext(), recovery, hostseckey32, currentKsd, currentRpd)
+    }
+
+    override fun confederationRecoverySerialize(recovery: ByteArray): ByteArray {
+        require(recovery.size == Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE) { "invalid opaque recovery size" }
+        return Secp256k1CFunctions.secp256k1_confederation_recovery_serialize(Secp256k1Context.getContext(), recovery)
+    }
+
+    override fun confederationRecoverySerializedSize(recovery: ByteArray): Int {
+        require(recovery.size == Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE) { "invalid opaque recovery size" }
+        return Secp256k1CFunctions.secp256k1_confederation_recovery_serialized_size(Secp256k1Context.getContext(), recovery)
+    }
+
+    override fun confederationRecoveryParse(input: ByteArray, hostseckey32: ByteArray): ByteArray {
+        require(input.size == Secp256k1.CONFEDERATION_RECOVERY_SIZE) { "recovery package must be ${Secp256k1.CONFEDERATION_RECOVERY_SIZE} bytes" }
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        return Secp256k1CFunctions.secp256k1_confederation_recovery_parse(Secp256k1Context.getContext(), input, hostseckey32)
+    }
 }

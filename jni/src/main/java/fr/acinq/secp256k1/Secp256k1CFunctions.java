@@ -337,4 +337,34 @@ public class Secp256k1CFunctions {
 
     /* Returns [min_signers, min_blockers]. */
     public static native int[] secp256k1_confederation_access_analyze(long ctx, byte[] rpd);
+
+    public static native byte[] secp256k1_confederation_transition_parse(long ctx, byte[] input, byte[] old_rpd, byte[] old_ksd, byte[] new_rpd, byte[] new_ksd);
+
+    public static native byte[] secp256k1_confederation_transition_serialize(long ctx, byte[] transition, byte[] old_rpd, byte[] old_ksd, byte[] new_rpd, byte[] new_ksd);
+
+    public static native int secp256k1_confederation_transition_serialized_size(long ctx, byte[] transition, byte[] old_rpd, byte[] old_ksd, byte[] new_rpd, byte[] new_ksd);
+
+    public static native int secp256k1_confederation_transition_conflicts(long ctx, byte[] first, byte[] second);
+
+    public static native byte[] secp256k1_confederation_transition_hash(long ctx, byte[] transition);
+
+    public static native int secp256k1_confederation_transition_validate(long ctx, byte[] transition, byte[] old_rpd, byte[] old_ksd, byte[] new_rpd, byte[] new_ksd);
+
+    public static native int secp256k1_confederation_transition_check_successor(long ctx, byte[] transition, byte[] current_rpd, byte[] current_ksd);
+
+    public static native byte[] secp256k1_confederation_share_wrap(long ctx, int group_id, int admin_id, byte[] secshare32, byte[] ksd, byte[] rpd);
+
+    public static native byte[] secp256k1_confederation_share_rebind(long ctx, byte[] share, byte[] hostseckey32, byte[] current_ksd, byte[] current_rpd);
+
+    public static native int secp256k1_confederation_share_validate(long ctx, byte[] share, byte[] current_ksd, byte[] current_rpd);
+
+    public static native byte[] secp256k1_confederation_recovery_issue(long ctx, byte[] share, byte[] hostseckey32, byte[] ksd, byte[] rpd, int operation, byte[] transition_hash32, byte[] recovery_nonce32);
+
+    public static native byte[] secp256k1_confederation_recovery_open(long ctx, byte[] recovery, byte[] hostseckey32, byte[] current_ksd, byte[] current_rpd);
+
+    public static native byte[] secp256k1_confederation_recovery_serialize(long ctx, byte[] recovery);
+
+    public static native int secp256k1_confederation_recovery_serialized_size(long ctx, byte[] recovery);
+
+    public static native byte[] secp256k1_confederation_recovery_parse(long ctx, byte[] input, byte[] hostseckey32);
 }

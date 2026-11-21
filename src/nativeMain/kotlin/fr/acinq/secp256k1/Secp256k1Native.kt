@@ -1708,6 +1708,163 @@ public object Secp256k1Native : Secp256k1 {
         secp256k1_confederation_access_analyze(ctx, access.ptr, allocConfederationRpd(rpd).ptr).requireSuccess("secp256k1_confederation_access_analyze() failed")
         ConfederationAccess(access.min_signers.toInt(), access.min_blockers.toInt())
     }
+
+    private class ConfederationNativeState(val rpd: secp256k1_confederation_rpd, val ksd: secp256k1_confederation_ksd)
+
+    private fun MemScope.allocConfederationState(rpd: ByteArray, ksd: ByteArray): ConfederationNativeState {
+        val nRpd = allocConfederationRpd(rpd)
+        return ConfederationNativeState(nRpd, allocConfederationKsd(ksd, nRpd))
+    }
+
+    private fun MemScope.allocOptionalConfederationState(rpd: ByteArray?, ksd: ByteArray?): ConfederationNativeState? {
+        require((rpd == null) == (ksd == null)) { "old RPD and KSD must be supplied together" }
+        return if (rpd == null) null else allocConfederationState(rpd, ksd!!)
+    }
+
+    private fun MemScope.allocConfederationTransition(transition: ByteArray): secp256k1_confederation_transition {
+        require(transition.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        val nTransition = alloc<secp256k1_confederation_transition>()
+        memcpy(nTransition.ptr, toNat(transition), Secp256k1.CONFEDERATION_TRANSITION_SIZE.convert())
+        return nTransition
+    }
+
+    private fun MemScope.parseConfederationTransition(input: ByteArray, oldState: ConfederationNativeState?, newState: ConfederationNativeState): secp256k1_confederation_transition {
+        require(input.isNotEmpty() && input.size <= Secp256k1.CONFEDERATION_TRANSITION_MAX_SERIALIZED_SIZE) { "invalid transition encoding size" }
+        val nTransition = alloc<secp256k1_confederation_transition>()
+        secp256k1_confederation_transition_parse(ctx, nTransition.ptr, toNat(input), input.size.convert(), oldState?.rpd?.ptr, oldState?.ksd?.ptr, newState.rpd.ptr, newState.ksd.ptr)
+            .requireSuccess("secp256k1_confederation_transition_parse() failed")
+        return nTransition
+    }
+
+    private fun MemScope.serializeConfederationTransition(transition: secp256k1_confederation_transition, oldState: ConfederationNativeState?, newState: ConfederationNativeState): ByteArray {
+        val len = secp256k1_confederation_transition_serialized_size(ctx, transition.ptr, oldState?.rpd?.ptr, oldState?.ksd?.ptr, newState.rpd.ptr, newState.ksd.ptr).toInt()
+        require(len > 0) { "invalid transition or descriptors" }
+        val out = allocArray<UByteVar>(len)
+        val outLen = alloc<size_tVar>()
+        outLen.value = len.convert()
+        secp256k1_confederation_transition_serialize(ctx, out, outLen.ptr, transition.ptr, oldState?.rpd?.ptr, oldState?.ksd?.ptr, newState.rpd.ptr, newState.ksd.ptr)
+            .requireSuccess("secp256k1_confederation_transition_serialize() failed")
+        return out.readBytes(outLen.value.toInt())
+    }
+
+    private fun MemScope.allocConfederationShare(share: ByteArray): secp256k1_confederation_share {
+        require(share.size == Secp256k1.CONFEDERATION_SHARE_SIZE) { "invalid opaque share size" }
+        val nShare = alloc<secp256k1_confederation_share>()
+        memcpy(nShare.ptr, toNat(share), Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+        return nShare
+    }
+
+    private fun MemScope.allocConfederationRecovery(recovery: ByteArray): secp256k1_confederation_recovery {
+        require(recovery.size == Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE) { "invalid opaque recovery size" }
+        val nRecovery = alloc<secp256k1_confederation_recovery>()
+        memcpy(nRecovery.ptr, toNat(recovery), Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE.convert())
+        return nRecovery
+    }
+
+    override fun confederationTransitionParse(input: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): ByteArray = memScoped {
+        val oldState = allocOptionalConfederationState(oldRpd, oldKsd)
+        val newState = allocConfederationState(newRpd, newKsd)
+        parseConfederationTransition(input, oldState, newState).ptr.readBytes(Secp256k1.CONFEDERATION_TRANSITION_SIZE)
+    }
+
+    override fun confederationTransitionSerialize(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): ByteArray = memScoped {
+        val nTransition = allocConfederationTransition(transition)
+        val oldState = allocOptionalConfederationState(oldRpd, oldKsd)
+        val newState = allocConfederationState(newRpd, newKsd)
+        serializeConfederationTransition(nTransition, oldState, newState)
+    }
+
+    override fun confederationTransitionSerializedSize(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): Int = memScoped {
+        val nTransition = allocConfederationTransition(transition)
+        val oldState = allocOptionalConfederationState(oldRpd, oldKsd)
+        val newState = allocConfederationState(newRpd, newKsd)
+        secp256k1_confederation_transition_serialized_size(ctx, nTransition.ptr, oldState?.rpd?.ptr, oldState?.ksd?.ptr, newState.rpd.ptr, newState.ksd.ptr).toInt()
+    }
+
+    override fun confederationTransitionConflicts(first: ByteArray, second: ByteArray): Boolean = memScoped {
+        secp256k1_confederation_transition_conflicts(ctx, allocConfederationTransition(first).ptr, allocConfederationTransition(second).ptr) == 1
+    }
+
+    override fun confederationTransitionHash(transition: ByteArray): ByteArray = memScoped {
+        val out = ByteArray(32)
+        secp256k1_confederation_transition_hash(ctx, toNat(out), allocConfederationTransition(transition).ptr).requireSuccess("secp256k1_confederation_transition_hash() failed")
+        out
+    }
+
+    override fun confederationTransitionValidate(transition: ByteArray, oldRpd: ByteArray?, oldKsd: ByteArray?, newRpd: ByteArray, newKsd: ByteArray): Boolean = memScoped {
+        val nTransition = allocConfederationTransition(transition)
+        val oldState = allocOptionalConfederationState(oldRpd, oldKsd)
+        val newState = allocConfederationState(newRpd, newKsd)
+        secp256k1_confederation_transition_validate(ctx, nTransition.ptr, oldState?.rpd?.ptr, oldState?.ksd?.ptr, newState.rpd.ptr, newState.ksd.ptr) == 1
+    }
+
+    override fun confederationTransitionCheckSuccessor(transition: ByteArray, currentRpd: ByteArray, currentKsd: ByteArray): Boolean = memScoped {
+        val state = allocConfederationState(currentRpd, currentKsd)
+        secp256k1_confederation_transition_check_successor(ctx, allocConfederationTransition(transition).ptr, state.rpd.ptr, state.ksd.ptr) == 1
+    }
+
+    override fun confederationShareWrap(groupId: UInt, adminId: UInt, secshare32: ByteArray, ksd: ByteArray, rpd: ByteArray): ByteArray = memScoped {
+        require(groupId < Secp256k1.CONFEDERATION_MAX_GROUPS.toUInt()) { "invalid group id" }
+        require(adminId < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt()) { "invalid admin id" }
+        require(secshare32.size == 32) { "secret share must be 32 bytes" }
+        val state = allocConfederationState(rpd, ksd)
+        val share = alloc<secp256k1_confederation_share>()
+        secp256k1_confederation_share_wrap(ctx, share.ptr, groupId, adminId, toNat(secshare32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_share_wrap() failed")
+        share.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+    }
+
+    override fun confederationShareRebind(share: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray = memScoped {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        val state = allocConfederationState(currentRpd, currentKsd)
+        val nShare = allocConfederationShare(share)
+        secp256k1_confederation_share_rebind(ctx, nShare.ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_share_rebind() failed")
+        nShare.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+    }
+
+    override fun confederationShareValidate(share: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): Boolean = memScoped {
+        val state = allocConfederationState(currentRpd, currentKsd)
+        secp256k1_confederation_share_validate(ctx, allocConfederationShare(share).ptr, state.ksd.ptr, state.rpd.ptr) == 1
+    }
+
+    override fun confederationRecoveryIssue(share: ByteArray, hostseckey32: ByteArray, ksd: ByteArray, rpd: ByteArray, operation: Int, transitionHash32: ByteArray, recoveryNonce32: ByteArray): ByteArray = memScoped {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        require(operation in 0..7) { "invalid recovery operation" }
+        require(transitionHash32.size == 32) { "transition hash must be 32 bytes" }
+        require(recoveryNonce32.size == 32) { "recovery nonce must be 32 bytes" }
+        val state = allocConfederationState(rpd, ksd)
+        val recovery = alloc<secp256k1_confederation_recovery>()
+        secp256k1_confederation_recovery_issue(ctx, recovery.ptr, allocConfederationShare(share).ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr, operation.toUInt(), toNat(transitionHash32), toNat(recoveryNonce32))
+            .requireSuccess("secp256k1_confederation_recovery_issue() failed")
+        recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+    }
+
+    override fun confederationRecoveryOpen(recovery: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray = memScoped {
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        val state = allocConfederationState(currentRpd, currentKsd)
+        val share = alloc<secp256k1_confederation_share>()
+        secp256k1_confederation_recovery_open(ctx, share.ptr, allocConfederationRecovery(recovery).ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_recovery_open() failed")
+        share.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+    }
+
+    override fun confederationRecoverySerialize(recovery: ByteArray): ByteArray = memScoped {
+        val out = allocArray<UByteVar>(Secp256k1.CONFEDERATION_RECOVERY_SIZE)
+        val outLen = alloc<size_tVar>()
+        outLen.value = Secp256k1.CONFEDERATION_RECOVERY_SIZE.convert()
+        secp256k1_confederation_recovery_serialize(ctx, out, outLen.ptr, allocConfederationRecovery(recovery).ptr).requireSuccess("secp256k1_confederation_recovery_serialize() failed")
+        out.readBytes(outLen.value.toInt())
+    }
+
+    override fun confederationRecoverySerializedSize(recovery: ByteArray): Int = memScoped {
+        secp256k1_confederation_recovery_serialized_size(ctx, allocConfederationRecovery(recovery).ptr).toInt()
+    }
+
+    override fun confederationRecoveryParse(input: ByteArray, hostseckey32: ByteArray): ByteArray = memScoped {
+        require(input.size == Secp256k1.CONFEDERATION_RECOVERY_SIZE) { "recovery package must be ${Secp256k1.CONFEDERATION_RECOVERY_SIZE} bytes" }
+        require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
+        val recovery = alloc<secp256k1_confederation_recovery>()
+        secp256k1_confederation_recovery_parse(ctx, recovery.ptr, toNat(input), input.size.convert(), toNat(hostseckey32)).requireSuccess("secp256k1_confederation_recovery_parse() failed")
+        recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+    }
 }
 
 internal actual fun getSecpk256k1(): Secp256k1 = Secp256k1Native

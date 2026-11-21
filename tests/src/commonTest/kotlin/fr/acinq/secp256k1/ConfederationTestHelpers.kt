@@ -8,6 +8,14 @@ internal fun JsonElement.confederationHex(name: String): ByteArray = Hex.decode(
 
 internal fun confederationVectors(): JsonElement = readResourceAsJson("confederation/vectors.json")
 
+internal fun JsonElement.confederationHexMap(name: String): Map<String, ByteArray> =
+    jsonObject[name]!!.jsonObject.mapValues { (_, value) -> Hex.decode(value.jsonPrimitive.content) }
+
+internal fun confederationHostSecret(role: Int): ByteArray = ByteArray(32).also {
+    it[30] = 0x10
+    it[31] = (role + 1).toByte()
+}
+
 internal fun ByteArray.confederationReadU32(offset: Int): Int =
     ((this[offset].toInt() and 0xff) shl 24) or
         ((this[offset + 1].toInt() and 0xff) shl 16) or

@@ -3909,3 +3909,267 @@ JNIEXPORT jintArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k
     (*penv)->SetIntArrayRegion(penv, out, 0, 2, values);
     return out;
 }
+
+
+#define CONFEDERATION_TRANSITION_MAX_SERIALIZED_SIZE 62408
+
+static int get_confederation_state(JNIEnv* penv, const secp256k1_context* ctx, jbyteArray jrpd, jbyteArray jksd, secp256k1_confederation_rpd* rpd, secp256k1_confederation_ksd* ksd, int required, int* present)
+{
+    *present = 0;
+    if (jrpd == NULL || jksd == NULL) {
+        if (required || jrpd != NULL || jksd != NULL) {
+            JNI_ThrowSecp256k1(penv, "RPD and KSD must be supplied together");
+            return 0;
+        }
+        return 1;
+    }
+    if (!get_confederation_rpd(penv, ctx, jrpd, rpd)) return 0;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, ksd, rpd)) return 0;
+    *present = 1;
+    return 1;
+}
+
+static jbyteArray confederation_transition_serialize(JNIEnv* penv, const secp256k1_context* ctx, const secp256k1_confederation_transition* transition, const secp256k1_confederation_rpd* old_rpd, const secp256k1_confederation_ksd* old_ksd, const secp256k1_confederation_rpd* new_rpd, const secp256k1_confederation_ksd* new_ksd)
+{
+    unsigned char* encoded;
+    jbyteArray out;
+    size_t len = secp256k1_confederation_transition_serialized_size(ctx, transition, old_rpd, old_ksd, new_rpd, new_ksd);
+    if (len == 0 || len > CONFEDERATION_TRANSITION_MAX_SERIALIZED_SIZE) {
+        JNI_ThrowSecp256k1(penv, "invalid transition or descriptors");
+        return NULL;
+    }
+    encoded = malloc(len);
+    if (encoded == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    if (!secp256k1_confederation_transition_serialize(ctx, encoded, &len, transition, old_rpd, old_ksd, new_rpd, new_ksd)) {
+        free(encoded);
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_transition_serialize failed");
+        return NULL;
+    }
+    out = copy_bytes_to_java(penv, encoded, len);
+    free(encoded);
+    return out;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1transition_1parse(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jinput, jbyteArray joldrpd, jbyteArray joldksd, jbyteArray jnewrpd, jbyteArray jnewksd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd old_rpd, new_rpd;
+    secp256k1_confederation_ksd old_ksd, new_ksd;
+    secp256k1_confederation_transition transition;
+    unsigned char* input = NULL;
+    size_t input_len = 0;
+    int has_old, has_new, result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_state(penv, ctx, joldrpd, joldksd, &old_rpd, &old_ksd, 0, &has_old)) return NULL;
+    if (!get_confederation_state(penv, ctx, jnewrpd, jnewksd, &new_rpd, &new_ksd, 1, &has_new)) return NULL;
+    if (!get_confederation_input(penv, jinput, CONFEDERATION_TRANSITION_MAX_SERIALIZED_SIZE, &input, &input_len, "transition encoding")) return NULL;
+    result = secp256k1_confederation_transition_parse(ctx, &transition, input, input_len, has_old ? &old_rpd : NULL, has_old ? &old_ksd : NULL, &new_rpd, &new_ksd);
+    free(input);
+    CHECKRESULT(!result, "secp256k1_confederation_transition_parse failed");
+    return copy_bytes_to_java(penv, transition.data, sizeof(transition.data));
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1transition_1serialize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtransition, jbyteArray joldrpd, jbyteArray joldksd, jbyteArray jnewrpd, jbyteArray jnewksd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd old_rpd, new_rpd;
+    secp256k1_confederation_ksd old_ksd, new_ksd;
+    secp256k1_confederation_transition transition;
+    int has_old, has_new;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtransition, sizeof(transition.data), transition.data, "opaque transition")) return NULL;
+    if (!get_confederation_state(penv, ctx, joldrpd, joldksd, &old_rpd, &old_ksd, 0, &has_old)) return NULL;
+    if (!get_confederation_state(penv, ctx, jnewrpd, jnewksd, &new_rpd, &new_ksd, 1, &has_new)) return NULL;
+    return confederation_transition_serialize(penv, ctx, &transition, has_old ? &old_rpd : NULL, has_old ? &old_ksd : NULL, &new_rpd, &new_ksd);
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1transition_1serialized_1size(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtransition, jbyteArray joldrpd, jbyteArray joldksd, jbyteArray jnewrpd, jbyteArray jnewksd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd old_rpd, new_rpd;
+    secp256k1_confederation_ksd old_ksd, new_ksd;
+    secp256k1_confederation_transition transition;
+    int has_old, has_new;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtransition, sizeof(transition.data), transition.data, "opaque transition")) return 0;
+    if (!get_confederation_state(penv, ctx, joldrpd, joldksd, &old_rpd, &old_ksd, 0, &has_old)) return 0;
+    if (!get_confederation_state(penv, ctx, jnewrpd, jnewksd, &new_rpd, &new_ksd, 1, &has_new)) return 0;
+    return (jint)secp256k1_confederation_transition_serialized_size(ctx, &transition, has_old ? &old_rpd : NULL, has_old ? &old_ksd : NULL, &new_rpd, &new_ksd);
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1transition_1conflicts(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jfirst, jbyteArray jsecond)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_transition first, second;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jfirst, sizeof(first.data), first.data, "first transition")) return 0;
+    if (!get_bytes(penv, jsecond, sizeof(second.data), second.data, "second transition")) return 0;
+    return secp256k1_confederation_transition_conflicts(ctx, &first, &second);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1transition_1hash(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtransition)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_transition transition;
+    unsigned char hash[32];
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtransition, sizeof(transition.data), transition.data, "opaque transition")) return NULL;
+    result = secp256k1_confederation_transition_hash(ctx, hash, &transition);
+    CHECKRESULT(!result, "secp256k1_confederation_transition_hash failed");
+    return copy_bytes_to_java(penv, hash, sizeof(hash));
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1transition_1validate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtransition, jbyteArray joldrpd, jbyteArray joldksd, jbyteArray jnewrpd, jbyteArray jnewksd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd old_rpd, new_rpd;
+    secp256k1_confederation_ksd old_ksd, new_ksd;
+    secp256k1_confederation_transition transition;
+    int has_old, has_new;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtransition, sizeof(transition.data), transition.data, "opaque transition")) return 0;
+    if (!get_confederation_state(penv, ctx, joldrpd, joldksd, &old_rpd, &old_ksd, 0, &has_old)) return 0;
+    if (!get_confederation_state(penv, ctx, jnewrpd, jnewksd, &new_rpd, &new_ksd, 1, &has_new)) return 0;
+    return secp256k1_confederation_transition_validate(ctx, &transition, has_old ? &old_rpd : NULL, has_old ? &old_ksd : NULL, &new_rpd, &new_ksd);
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1transition_1check_1successor(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtransition, jbyteArray jcurrentrpd, jbyteArray jcurrentksd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_transition transition;
+    int present;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jtransition, sizeof(transition.data), transition.data, "opaque transition")) return 0;
+    if (!get_confederation_state(penv, ctx, jcurrentrpd, jcurrentksd, &rpd, &ksd, 1, &present)) return 0;
+    return secp256k1_confederation_transition_check_successor(ctx, &transition, &rpd, &ksd);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1share_1wrap(JNIEnv* penv, jclass clazz, jlong jctx, jint jgroupid, jint jadminid, jbyteArray jsecshare, jbyteArray jksd, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_share share;
+    unsigned char secshare[32];
+    int present, result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jgroupid < 0 || jgroupid >= SECP256K1_CONFEDERATION_MAX_GROUPS, "invalid group id");
+    CHECKRESULT(jadminid < 0 || jadminid >= SECP256K1_CONFEDERATION_MAX_ROLES, "invalid admin id");
+    if (!get_confederation_state(penv, ctx, jrpd, jksd, &rpd, &ksd, 1, &present)) return NULL;
+    if (!get_bytes32(penv, jsecshare, secshare, "secret share")) return NULL;
+    result = secp256k1_confederation_share_wrap(ctx, &share, (uint32_t)jgroupid, (uint32_t)jadminid, secshare, &ksd, &rpd);
+    CHECKRESULT(!result, "secp256k1_confederation_share_wrap failed");
+    return copy_bytes_to_java(penv, share.data, sizeof(share.data));
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1share_1rebind(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jhostseckey, jbyteArray jcurrentksd, jbyteArray jcurrentrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_share share;
+    unsigned char hostseckey[32];
+    int present, result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_state(penv, ctx, jcurrentrpd, jcurrentksd, &rpd, &ksd, 1, &present)) return NULL;
+    if (!get_bytes(penv, jshare, sizeof(share.data), share.data, "opaque share")) return NULL;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
+    result = secp256k1_confederation_share_rebind(ctx, &share, hostseckey, &ksd, &rpd);
+    CHECKRESULT(!result, "secp256k1_confederation_share_rebind failed");
+    return copy_bytes_to_java(penv, share.data, sizeof(share.data));
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1share_1validate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jcurrentksd, jbyteArray jcurrentrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_share share;
+    int present;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_state(penv, ctx, jcurrentrpd, jcurrentksd, &rpd, &ksd, 1, &present)) return 0;
+    if (!get_bytes(penv, jshare, sizeof(share.data), share.data, "opaque share")) return 0;
+    return secp256k1_confederation_share_validate(ctx, &share, &ksd, &rpd);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1recovery_1issue(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jhostseckey, jbyteArray jksd, jbyteArray jrpd, jint joperation, jbyteArray jtransitionhash, jbyteArray jrecoverynonce)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_share share;
+    secp256k1_confederation_recovery recovery;
+    unsigned char hostseckey[32], transition_hash[32], recovery_nonce[32];
+    int present, result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(joperation < 0 || joperation > 7, "invalid recovery operation");
+    if (!get_confederation_state(penv, ctx, jrpd, jksd, &rpd, &ksd, 1, &present)) return NULL;
+    if (!get_bytes(penv, jshare, sizeof(share.data), share.data, "opaque share")) return NULL;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
+    if (!get_bytes32(penv, jtransitionhash, transition_hash, "transition hash")) return NULL;
+    if (!get_bytes32(penv, jrecoverynonce, recovery_nonce, "recovery nonce")) return NULL;
+    result = secp256k1_confederation_recovery_issue(ctx, &recovery, &share, hostseckey, &ksd, &rpd, (uint32_t)joperation, transition_hash, recovery_nonce);
+    CHECKRESULT(!result, "secp256k1_confederation_recovery_issue failed");
+    return copy_bytes_to_java(penv, recovery.data, sizeof(recovery.data));
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1recovery_1open(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrecovery, jbyteArray jhostseckey, jbyteArray jcurrentksd, jbyteArray jcurrentrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_recovery recovery;
+    secp256k1_confederation_share share;
+    unsigned char hostseckey[32];
+    int present, result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_state(penv, ctx, jcurrentrpd, jcurrentksd, &rpd, &ksd, 1, &present)) return NULL;
+    if (!get_bytes(penv, jrecovery, sizeof(recovery.data), recovery.data, "opaque recovery")) return NULL;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
+    result = secp256k1_confederation_recovery_open(ctx, &share, &recovery, hostseckey, &ksd, &rpd);
+    CHECKRESULT(!result, "secp256k1_confederation_recovery_open failed");
+    return copy_bytes_to_java(penv, share.data, sizeof(share.data));
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1recovery_1serialize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrecovery)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_recovery recovery;
+    unsigned char encoded[SECP256K1_CONFEDERATION_RECOVERY_SIZE];
+    size_t len = sizeof(encoded);
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jrecovery, sizeof(recovery.data), recovery.data, "opaque recovery")) return NULL;
+    result = secp256k1_confederation_recovery_serialize(ctx, encoded, &len, &recovery);
+    CHECKRESULT(!result || len != sizeof(encoded), "secp256k1_confederation_recovery_serialize failed");
+    return copy_bytes_to_java(penv, encoded, len);
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1recovery_1serialized_1size(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrecovery)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_recovery recovery;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jrecovery, sizeof(recovery.data), recovery.data, "opaque recovery")) return 0;
+    return (jint)secp256k1_confederation_recovery_serialized_size(ctx, &recovery);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1recovery_1parse(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jinput, jbyteArray jhostseckey)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_recovery recovery;
+    unsigned char encoded[SECP256K1_CONFEDERATION_RECOVERY_SIZE], hostseckey[32];
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jinput, sizeof(encoded), encoded, "recovery package")) return NULL;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
+    result = secp256k1_confederation_recovery_parse(ctx, &recovery, encoded, sizeof(encoded), hostseckey);
+    CHECKRESULT(!result, "secp256k1_confederation_recovery_parse failed");
+    return copy_bytes_to_java(penv, recovery.data, sizeof(recovery.data));
+}
