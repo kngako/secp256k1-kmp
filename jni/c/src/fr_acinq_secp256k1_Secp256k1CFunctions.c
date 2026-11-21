@@ -8,6 +8,7 @@
 #include "fr_acinq_secp256k1_Secp256k1CFunctions.h"
 #include "include/secp256k1.h"
 #include "include/secp256k1_chilldkg.h"
+#include "include/secp256k1_confederation.h"
 #include "include/secp256k1_ecdh.h"
 #include "include/secp256k1_musig.h"
 #include "include/secp256k1_frost.h"
@@ -3667,4 +3668,244 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     CHECKRESULT(!result, "secp256k1_frost_enrollment_reduced_secshare_gen failed");
 
     return copy_bytes_to_java(penv, secshare32, sizeof(secshare32));
+}
+
+
+#define CONFEDERATION_RPD_MAX_SERIALIZED_SIZE 10208
+#define CONFEDERATION_KSD_MAX_SERIALIZED_SIZE 10929
+
+static int get_confederation_input(JNIEnv* penv, jbyteArray jinput, size_t max_size, unsigned char** input, size_t* input_len, const char* name)
+{
+    jsize len;
+    if (jinput == NULL) {
+        JNI_ThrowNull(penv, name);
+        return 0;
+    }
+    len = (*penv)->GetArrayLength(penv, jinput);
+    if (len < 1 || (size_t)len > max_size) {
+        JNI_ThrowSecp256k1(penv, "invalid confederation encoding size");
+        return 0;
+    }
+    *input = malloc((size_t)len);
+    if (*input == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return 0;
+    }
+    (*penv)->GetByteArrayRegion(penv, jinput, 0, len, (jbyte*)*input);
+    if ((*penv)->ExceptionCheck(penv)) {
+        free(*input);
+        *input = NULL;
+        return 0;
+    }
+    *input_len = (size_t)len;
+    return 1;
+}
+
+static int get_confederation_rpd(JNIEnv* penv, const secp256k1_context* ctx, jbyteArray jrpd, secp256k1_confederation_rpd* rpd)
+{
+    if (!get_bytes(penv, jrpd, sizeof(rpd->data), rpd->data, "opaque RPD")) return 0;
+    if (!secp256k1_confederation_rpd_validate(ctx, rpd)) {
+        JNI_ThrowSecp256k1(penv, "invalid opaque RPD");
+        return 0;
+    }
+    return 1;
+}
+
+static int get_confederation_ksd(JNIEnv* penv, const secp256k1_context* ctx, jbyteArray jksd, jbyteArray jrpd, secp256k1_confederation_ksd* ksd, const secp256k1_confederation_rpd* rpd)
+{
+    (void)jrpd;
+    if (!get_bytes(penv, jksd, sizeof(ksd->data), ksd->data, "opaque KSD")) return 0;
+    if (!secp256k1_confederation_ksd_validate(ctx, ksd, rpd)) {
+        JNI_ThrowSecp256k1(penv, "invalid opaque KSD for RPD");
+        return 0;
+    }
+    return 1;
+}
+
+static jbyteArray confederation_rpd_serialize(JNIEnv* penv, const secp256k1_context* ctx, const secp256k1_confederation_rpd* rpd)
+{
+    unsigned char* encoded;
+    jbyteArray out;
+    size_t len = secp256k1_confederation_rpd_serialized_size(ctx, rpd);
+    if (len == 0 || len > CONFEDERATION_RPD_MAX_SERIALIZED_SIZE) {
+        JNI_ThrowSecp256k1(penv, "invalid opaque RPD");
+        return NULL;
+    }
+    encoded = malloc(len);
+    if (encoded == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    if (!secp256k1_confederation_rpd_serialize(ctx, encoded, &len, rpd)) {
+        free(encoded);
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_rpd_serialize failed");
+        return NULL;
+    }
+    out = copy_bytes_to_java(penv, encoded, len);
+    free(encoded);
+    return out;
+}
+
+static jbyteArray confederation_ksd_serialize(JNIEnv* penv, const secp256k1_context* ctx, const secp256k1_confederation_ksd* ksd, const secp256k1_confederation_rpd* rpd)
+{
+    unsigned char* encoded;
+    jbyteArray out;
+    size_t len = secp256k1_confederation_ksd_serialized_size(ctx, ksd, rpd);
+    if (len == 0 || len > CONFEDERATION_KSD_MAX_SERIALIZED_SIZE) {
+        JNI_ThrowSecp256k1(penv, "invalid opaque KSD for RPD");
+        return NULL;
+    }
+    encoded = malloc(len);
+    if (encoded == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    if (!secp256k1_confederation_ksd_serialize(ctx, encoded, &len, ksd, rpd)) {
+        free(encoded);
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_ksd_serialize failed");
+        return NULL;
+    }
+    out = copy_bytes_to_java(penv, encoded, len);
+    free(encoded);
+    return out;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1rpd_1parse(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jinput)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    unsigned char* input = NULL;
+    size_t input_len = 0;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_input(penv, jinput, CONFEDERATION_RPD_MAX_SERIALIZED_SIZE, &input, &input_len, "RPD encoding")) return NULL;
+    result = secp256k1_confederation_rpd_parse(ctx, &rpd, input, input_len);
+    free(input);
+    CHECKRESULT(!result, "secp256k1_confederation_rpd_parse failed");
+    return copy_bytes_to_java(penv, rpd.data, sizeof(rpd.data));
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1rpd_1validate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jrpd, sizeof(rpd.data), rpd.data, "opaque RPD")) return 0;
+    return secp256k1_confederation_rpd_validate(ctx, &rpd);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1rpd_1serialize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    return confederation_rpd_serialize(penv, ctx, &rpd);
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1rpd_1serialized_1size(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jrpd, sizeof(rpd.data), rpd.data, "opaque RPD")) return 0;
+    return (jint)secp256k1_confederation_rpd_serialized_size(ctx, &rpd);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1rpd_1hash(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    unsigned char hash[32];
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    result = secp256k1_confederation_rpd_hash(ctx, hash, &rpd);
+    CHECKRESULT(!result, "secp256k1_confederation_rpd_hash failed");
+    return copy_bytes_to_java(penv, hash, sizeof(hash));
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1ksd_1parse(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jinput, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    unsigned char* input = NULL;
+    size_t input_len = 0;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_confederation_input(penv, jinput, CONFEDERATION_KSD_MAX_SERIALIZED_SIZE, &input, &input_len, "KSD encoding")) return NULL;
+    result = secp256k1_confederation_ksd_parse(ctx, &ksd, input, input_len, &rpd);
+    free(input);
+    CHECKRESULT(!result, "secp256k1_confederation_ksd_parse failed");
+    return copy_bytes_to_java(penv, ksd.data, sizeof(ksd.data));
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1ksd_1validate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jksd, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jrpd, sizeof(rpd.data), rpd.data, "opaque RPD")) return 0;
+    if (!get_bytes(penv, jksd, sizeof(ksd.data), ksd.data, "opaque KSD")) return 0;
+    return secp256k1_confederation_ksd_validate(ctx, &ksd, &rpd);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1ksd_1serialize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jksd, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &ksd, &rpd)) return NULL;
+    return confederation_ksd_serialize(penv, ctx, &ksd, &rpd);
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1ksd_1serialized_1size(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jksd, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jrpd, sizeof(rpd.data), rpd.data, "opaque RPD")) return 0;
+    if (!get_bytes(penv, jksd, sizeof(ksd.data), ksd.data, "opaque KSD")) return 0;
+    return (jint)secp256k1_confederation_ksd_serialized_size(ctx, &ksd, &rpd);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1ksd_1hash(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jksd, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    unsigned char hash[32];
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &ksd, &rpd)) return NULL;
+    result = secp256k1_confederation_ksd_hash(ctx, hash, &ksd, &rpd);
+    CHECKRESULT(!result, "secp256k1_confederation_ksd_hash failed");
+    return copy_bytes_to_java(penv, hash, sizeof(hash));
+}
+
+JNIEXPORT jintArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1access_1analyze(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_access access;
+    jint values[2];
+    jintArray out;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    result = secp256k1_confederation_access_analyze(ctx, &access, &rpd);
+    CHECKRESULT(!result, "secp256k1_confederation_access_analyze failed");
+    values[0] = (jint)access.min_signers;
+    values[1] = (jint)access.min_blockers;
+    out = (*penv)->NewIntArray(penv, 2);
+    CHECKRESULT(out == NULL, "memory allocation failed");
+    (*penv)->SetIntArrayRegion(penv, out, 0, 2, values);
+    return out;
 }

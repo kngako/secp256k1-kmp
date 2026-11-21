@@ -740,4 +740,65 @@ public object Secp256k1Jni : Secp256k1 {
         psigs.forEach { require(it.size == Secp256k1.ICEBERG_PARTIAL_SIG_SIZE) { "signature share must be ${Secp256k1.ICEBERG_PARTIAL_SIG_SIZE} bytes" } }
         return Secp256k1CFunctions.secp256k1_iceberg_partial_sig_agg(Secp256k1Context.getContext(), psigs, n, t)
     }
+
+    override fun confederationRpdParse(input: ByteArray): ByteArray {
+        require(input.isNotEmpty() && input.size <= Secp256k1.CONFEDERATION_RPD_MAX_SERIALIZED_SIZE) { "invalid RPD encoding size" }
+        return Secp256k1CFunctions.secp256k1_confederation_rpd_parse(Secp256k1Context.getContext(), input)
+    }
+
+    override fun confederationRpdValidate(rpd: ByteArray): Boolean {
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_rpd_validate(Secp256k1Context.getContext(), rpd) == 1
+    }
+
+    override fun confederationRpdSerialize(rpd: ByteArray): ByteArray {
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_rpd_serialize(Secp256k1Context.getContext(), rpd)
+    }
+
+    override fun confederationRpdSerializedSize(rpd: ByteArray): Int {
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_rpd_serialized_size(Secp256k1Context.getContext(), rpd)
+    }
+
+    override fun confederationRpdHash(rpd: ByteArray): ByteArray {
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_rpd_hash(Secp256k1Context.getContext(), rpd)
+    }
+
+    override fun confederationKsdParse(input: ByteArray, rpd: ByteArray): ByteArray {
+        require(input.isNotEmpty() && input.size <= Secp256k1.CONFEDERATION_KSD_MAX_SERIALIZED_SIZE) { "invalid KSD encoding size" }
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_ksd_parse(Secp256k1Context.getContext(), input, rpd)
+    }
+
+    override fun confederationKsdValidate(ksd: ByteArray, rpd: ByteArray): Boolean {
+        require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_ksd_validate(Secp256k1Context.getContext(), ksd, rpd) == 1
+    }
+
+    override fun confederationKsdSerialize(ksd: ByteArray, rpd: ByteArray): ByteArray {
+        require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_ksd_serialize(Secp256k1Context.getContext(), ksd, rpd)
+    }
+
+    override fun confederationKsdSerializedSize(ksd: ByteArray, rpd: ByteArray): Int {
+        require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_ksd_serialized_size(Secp256k1Context.getContext(), ksd, rpd)
+    }
+
+    override fun confederationKsdHash(ksd: ByteArray, rpd: ByteArray): ByteArray {
+        require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        return Secp256k1CFunctions.secp256k1_confederation_ksd_hash(Secp256k1Context.getContext(), ksd, rpd)
+    }
+
+    override fun confederationAccessAnalyze(rpd: ByteArray): ConfederationAccess {
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        val access = Secp256k1CFunctions.secp256k1_confederation_access_analyze(Secp256k1Context.getContext(), rpd)
+        return ConfederationAccess(access[0], access[1])
+    }
 }

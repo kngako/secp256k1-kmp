@@ -1603,6 +1603,111 @@ public object Secp256k1Native : Secp256k1 {
             return out
         }
     }
+
+    private fun MemScope.allocConfederationRpd(rpd: ByteArray, validate: Boolean = true): secp256k1_confederation_rpd {
+        require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+        val nRpd = alloc<secp256k1_confederation_rpd>()
+        memcpy(nRpd.ptr, toNat(rpd), Secp256k1.CONFEDERATION_RPD_SIZE.convert())
+        if (validate) secp256k1_confederation_rpd_validate(ctx, nRpd.ptr).requireSuccess("invalid opaque RPD")
+        return nRpd
+    }
+
+    private fun MemScope.allocConfederationKsd(ksd: ByteArray, rpd: secp256k1_confederation_rpd, validate: Boolean = true): secp256k1_confederation_ksd {
+        require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+        val nKsd = alloc<secp256k1_confederation_ksd>()
+        memcpy(nKsd.ptr, toNat(ksd), Secp256k1.CONFEDERATION_KSD_SIZE.convert())
+        if (validate) secp256k1_confederation_ksd_validate(ctx, nKsd.ptr, rpd.ptr).requireSuccess("invalid opaque KSD for RPD")
+        return nKsd
+    }
+
+    private fun MemScope.parseConfederationRpd(input: ByteArray): secp256k1_confederation_rpd {
+        require(input.isNotEmpty() && input.size <= Secp256k1.CONFEDERATION_RPD_MAX_SERIALIZED_SIZE) { "invalid RPD encoding size" }
+        val nRpd = alloc<secp256k1_confederation_rpd>()
+        secp256k1_confederation_rpd_parse(ctx, nRpd.ptr, toNat(input), input.size.convert()).requireSuccess("secp256k1_confederation_rpd_parse() failed")
+        return nRpd
+    }
+
+    private fun MemScope.parseConfederationKsd(input: ByteArray, rpd: secp256k1_confederation_rpd): secp256k1_confederation_ksd {
+        require(input.isNotEmpty() && input.size <= Secp256k1.CONFEDERATION_KSD_MAX_SERIALIZED_SIZE) { "invalid KSD encoding size" }
+        val nKsd = alloc<secp256k1_confederation_ksd>()
+        secp256k1_confederation_ksd_parse(ctx, nKsd.ptr, toNat(input), input.size.convert(), rpd.ptr).requireSuccess("secp256k1_confederation_ksd_parse() failed")
+        return nKsd
+    }
+
+    private fun MemScope.serializeConfederationRpd(rpd: secp256k1_confederation_rpd): ByteArray {
+        val len = secp256k1_confederation_rpd_serialized_size(ctx, rpd.ptr).toInt()
+        require(len > 0) { "invalid opaque RPD" }
+        val out = allocArray<UByteVar>(len)
+        val outLen = alloc<size_tVar>()
+        outLen.value = len.convert()
+        secp256k1_confederation_rpd_serialize(ctx, out, outLen.ptr, rpd.ptr).requireSuccess("secp256k1_confederation_rpd_serialize() failed")
+        return out.readBytes(outLen.value.toInt())
+    }
+
+    private fun MemScope.serializeConfederationKsd(ksd: secp256k1_confederation_ksd, rpd: secp256k1_confederation_rpd): ByteArray {
+        val len = secp256k1_confederation_ksd_serialized_size(ctx, ksd.ptr, rpd.ptr).toInt()
+        require(len > 0) { "invalid opaque KSD for RPD" }
+        val out = allocArray<UByteVar>(len)
+        val outLen = alloc<size_tVar>()
+        outLen.value = len.convert()
+        secp256k1_confederation_ksd_serialize(ctx, out, outLen.ptr, ksd.ptr, rpd.ptr).requireSuccess("secp256k1_confederation_ksd_serialize() failed")
+        return out.readBytes(outLen.value.toInt())
+    }
+
+    override fun confederationRpdParse(input: ByteArray): ByteArray = memScoped {
+        parseConfederationRpd(input).ptr.readBytes(Secp256k1.CONFEDERATION_RPD_SIZE)
+    }
+
+    override fun confederationRpdValidate(rpd: ByteArray): Boolean = memScoped {
+        secp256k1_confederation_rpd_validate(ctx, allocConfederationRpd(rpd, validate = false).ptr) == 1
+    }
+
+    override fun confederationRpdSerialize(rpd: ByteArray): ByteArray = memScoped {
+        serializeConfederationRpd(allocConfederationRpd(rpd))
+    }
+
+    override fun confederationRpdSerializedSize(rpd: ByteArray): Int = memScoped {
+        secp256k1_confederation_rpd_serialized_size(ctx, allocConfederationRpd(rpd, validate = false).ptr).toInt()
+    }
+
+    override fun confederationRpdHash(rpd: ByteArray): ByteArray = memScoped {
+        val out = ByteArray(32)
+        secp256k1_confederation_rpd_hash(ctx, toNat(out), allocConfederationRpd(rpd).ptr).requireSuccess("secp256k1_confederation_rpd_hash() failed")
+        out
+    }
+
+    override fun confederationKsdParse(input: ByteArray, rpd: ByteArray): ByteArray = memScoped {
+        val nRpd = allocConfederationRpd(rpd)
+        parseConfederationKsd(input, nRpd).ptr.readBytes(Secp256k1.CONFEDERATION_KSD_SIZE)
+    }
+
+    override fun confederationKsdValidate(ksd: ByteArray, rpd: ByteArray): Boolean = memScoped {
+        val nRpd = allocConfederationRpd(rpd, validate = false)
+        secp256k1_confederation_ksd_validate(ctx, allocConfederationKsd(ksd, nRpd, validate = false).ptr, nRpd.ptr) == 1
+    }
+
+    override fun confederationKsdSerialize(ksd: ByteArray, rpd: ByteArray): ByteArray = memScoped {
+        val nRpd = allocConfederationRpd(rpd)
+        serializeConfederationKsd(allocConfederationKsd(ksd, nRpd), nRpd)
+    }
+
+    override fun confederationKsdSerializedSize(ksd: ByteArray, rpd: ByteArray): Int = memScoped {
+        val nRpd = allocConfederationRpd(rpd, validate = false)
+        secp256k1_confederation_ksd_serialized_size(ctx, allocConfederationKsd(ksd, nRpd, validate = false).ptr, nRpd.ptr).toInt()
+    }
+
+    override fun confederationKsdHash(ksd: ByteArray, rpd: ByteArray): ByteArray = memScoped {
+        val nRpd = allocConfederationRpd(rpd)
+        val out = ByteArray(32)
+        secp256k1_confederation_ksd_hash(ctx, toNat(out), allocConfederationKsd(ksd, nRpd).ptr, nRpd.ptr).requireSuccess("secp256k1_confederation_ksd_hash() failed")
+        out
+    }
+
+    override fun confederationAccessAnalyze(rpd: ByteArray): ConfederationAccess = memScoped {
+        val access = alloc<secp256k1_confederation_access>()
+        secp256k1_confederation_access_analyze(ctx, access.ptr, allocConfederationRpd(rpd).ptr).requireSuccess("secp256k1_confederation_access_analyze() failed")
+        ConfederationAccess(access.min_signers.toInt(), access.min_blockers.toInt())
+    }
 }
 
 internal actual fun getSecpk256k1(): Secp256k1 = Secp256k1Native

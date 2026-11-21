@@ -313,4 +313,28 @@ public class Secp256k1CFunctions {
     public static native int secp256k1_iceberg_partial_sig_verify(long ctx, byte[] psig, byte[] pubshare, byte[][] pubnonces, int n, int t, byte[] grouppk, byte[] keyaggcache, byte[] msg32, byte[] cosigner_aggnonce);
 
     public static native byte[] secp256k1_iceberg_partial_sig_agg(long ctx, byte[][] psigs, int n, int t);
+
+    /* Canonical descriptors cross the boundary as variable-length byte strings; live descriptors are opaque. */
+    public static native byte[] secp256k1_confederation_rpd_parse(long ctx, byte[] input);
+
+    public static native int secp256k1_confederation_rpd_validate(long ctx, byte[] rpd);
+
+    public static native byte[] secp256k1_confederation_rpd_serialize(long ctx, byte[] rpd);
+
+    public static native int secp256k1_confederation_rpd_serialized_size(long ctx, byte[] rpd);
+
+    public static native byte[] secp256k1_confederation_rpd_hash(long ctx, byte[] rpd);
+
+    public static native byte[] secp256k1_confederation_ksd_parse(long ctx, byte[] input, byte[] rpd);
+
+    public static native int secp256k1_confederation_ksd_validate(long ctx, byte[] ksd, byte[] rpd);
+
+    public static native byte[] secp256k1_confederation_ksd_serialize(long ctx, byte[] ksd, byte[] rpd);
+
+    public static native int secp256k1_confederation_ksd_serialized_size(long ctx, byte[] ksd, byte[] rpd);
+
+    public static native byte[] secp256k1_confederation_ksd_hash(long ctx, byte[] ksd, byte[] rpd);
+
+    /* Returns [min_signers, min_blockers]. */
+    public static native int[] secp256k1_confederation_access_analyze(long ctx, byte[] rpd);
 }

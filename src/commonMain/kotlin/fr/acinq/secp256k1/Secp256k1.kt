@@ -1107,7 +1107,48 @@ public interface Secp256k1 {
      * @return 32-byte serialized MuSig2 partial signature.
      */
     public fun icebergPartialSigAgg(psigs: Array<ByteArray>, n: Int, t: Int): ByteArray
-    
+
+    /**
+     * Experimental nested threshold key generation and signing. Confederation is research code, not secure or
+     * stable, and must not be used in production or to protect value. Opaque objects returned by these functions
+     * are build-specific and must not be persisted or exchanged between library versions or ABIs. Use the
+     * serialize functions to obtain canonical storage and wire encodings.
+     */
+    public fun confederationRpdParse(input: ByteArray): ByteArray
+
+    /** Return true when [rpd] is a valid opaque RosterPolicyDescriptor. */
+    public fun confederationRpdValidate(rpd: ByteArray): Boolean
+
+    /** Serialize an opaque RPD to its canonical encoding. */
+    public fun confederationRpdSerialize(rpd: ByteArray): ByteArray
+
+    /** Return the canonical RPD size, or 0 when [rpd] is invalid. */
+    public fun confederationRpdSerializedSize(rpd: ByteArray): Int
+
+    /** Compute the tagged hash of an opaque RPD. */
+    public fun confederationRpdHash(rpd: ByteArray): ByteArray
+
+    /** Parse a canonical KeyStateDescriptor against an opaque RPD. */
+    public fun confederationKsdParse(input: ByteArray, rpd: ByteArray): ByteArray
+
+    /** Return true when [ksd] is valid and linked to [rpd]. */
+    public fun confederationKsdValidate(ksd: ByteArray, rpd: ByteArray): Boolean
+
+    /** Serialize an opaque KSD to its canonical encoding. */
+    public fun confederationKsdSerialize(ksd: ByteArray, rpd: ByteArray): ByteArray
+
+    /** Return the canonical KSD size, or 0 when [ksd] is invalid for [rpd]. */
+    public fun confederationKsdSerializedSize(ksd: ByteArray, rpd: ByteArray): Int
+
+    /** Compute the tagged hash of an opaque KSD and RPD pair. */
+    public fun confederationKsdHash(ksd: ByteArray, rpd: ByteArray): ByteArray
+
+    /**
+     * Compute exact minimum signing and blocking coalitions. This operation fails for configurations with more
+     * than 16 roles rather than approximating their entity-overlap analysis.
+     */
+    public fun confederationAccessAnalyze(rpd: ByteArray): ConfederationAccess
+
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
         public fun get(): Secp256k1 = this
@@ -1138,6 +1179,19 @@ public interface Secp256k1 {
         public const val ICEBERG_PUBLIC_SHARE_SIZE: Int = 34
         public const val ICEBERG_PUBLIC_NONCE_SIZE: Int = 67
         public const val ICEBERG_PARTIAL_SIG_SIZE: Int = 33
+
+        public const val CONFEDERATION_VERSION: Int = 1
+        public const val CONFEDERATION_MAX_GROUPS: Int = 64
+        public const val CONFEDERATION_MAX_ROLES: Int = 128
+        public const val CONFEDERATION_RPD_SIZE: Int = 65536
+        public const val CONFEDERATION_KSD_SIZE: Int = 65536
+        public const val CONFEDERATION_TRANSITION_SIZE: Int = 65536
+        public const val CONFEDERATION_SHARE_SIZE: Int = 256
+        public const val CONFEDERATION_RECOVERY_OPAQUE_SIZE: Int = 1024
+        public const val CONFEDERATION_RECOVERY_SIZE: Int = 269
+        public const val CONFEDERATION_RPD_MAX_SERIALIZED_SIZE: Int = 10208
+        public const val CONFEDERATION_KSD_MAX_SERIALIZED_SIZE: Int = 10929
+        public val CONFEDERATION_NO_SPECIFIC_ROLE: UInt = UInt.MAX_VALUE
         /*
          * libsecp256k1 tags each of its opaque musig2 objects with a 4-byte magic prefix and validates it
          * internally with ARG_CHECK, which invokes the context's illegal-argument callback. The default
@@ -1232,6 +1286,9 @@ public data class ChilldkgRecoverResult(val fault: ChilldkgFault, val secshare: 
 public data class FrostEnrollmentShareAggResult(val sigma: ByteArray?, val mismatchId: UInt?) {
     public val isOk: Boolean get() = sigma != null
 }
+
+/** Exact minimum signing and blocking coalition sizes for a confederation roster. */
+public data class ConfederationAccess(val minSigners: Int, val minBlockers: Int)
 
 public class Secp256k1Exception : RuntimeException {
     public constructor() : super()
