@@ -106,6 +106,25 @@ Deltas and sigmas are additive shares of real secret shares and must use confide
 
 **Warning:** the underlying enrollment module is experimental and must not be used in production. In particular, the generalized reduced protocol with more helpers than the threshold requires independent review. See the [protocol notes](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/a04dc1edd71783990e1fcde648fa42ac5d03eefa/src/modules/frost_enrollment/frost_enrollment.md), [API contract](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/a04dc1edd71783990e1fcde648fa42ac5d03eefa/include/secp256k1_frost_enrollment.h), and [upstream example](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/a04dc1edd71783990e1fcde648fa42ac5d03eefa/examples/frost_enrollment.c) for the complete security contract. `FrostReducedEnrollmentTest` demonstrates the corresponding Kotlin call sequence.
 
+### Confederation
+
+The `confederation...` functions expose nested threshold key generation and signing, descriptor and transition validation, entity-overlap analysis, share rebinding, and recovery packages through the same JVM/JNI and Kotlin/Native APIs.
+
+**Warning:** confederation is experimental research code under active design and review. It is not audited or stable and must not be used in production or to protect value. The initial DKG, signing, and lifecycle implementations require independent implementation review; full masking as changed has no independent review. See the pinned [public API](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/e18a8e8e5cba0e10860b7f3e6a8464f257ed9e61/include/secp256k1_confederation.h), [protocol candidate](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/e18a8e8e5cba0e10860b7f3e6a8464f257ed9e61/doc/confederation-protocol.md), and [security limitations](https://code.sigidli.com/frost/secp256k1-zkp/src/commit/e18a8e8e5cba0e10860b7f3e6a8464f257ed9e61/src/modules/confederation/security.md).
+
+Canonical descriptor, transition, and recovery encodings may be persisted or transported. The larger objects returned by parse and DKG calls are build-specific opaque native values: do not inspect, persist, or exchange them between library versions or ABIs. Serialize them before storage. Opaque shares and recovery data are secret.
+
+A typical initial sequence is:
+
+1. Parse and validate a canonical RPD, then call `confederationDkg` with a fresh session seed and one freshly generated host secret, dealer seed, and recovery nonce per flattened RPD role.
+2. Validate the genesis transition against the returned KSD. Persist accepted `(config_seq, RPD hash, KSD hash)` state, canonical transitions, shares, and recovery data atomically. Certificates do not provide consensus: check successors and quarantine conflicting certificates.
+3. Sign with a fresh signing session ID, full-role share and host-secret arrays, and canonically ordered group/admin selections. Four zero bytes encode no tweaks. Secret nonces are consumed by each attempt and must never be reused across attempts.
+4. Serialize recovery packages with `confederationRecoverySerialize`. Later, parse them with the corresponding host secret, open them against the current RPD/KSD, and validate the recovered share.
+
+The library is stateless. Transport, sender authentication, real-world entity attestation, authorization, durable attempt and abandonment records, timeout handling, consensus, and atomic state transitions remain application responsibilities. Unique host keys do not establish independent people or entities. RecoveryPackage encryption is a non-standard candidate; compromising a host key exposes that role's shares in every epoch where the key was registered.
+
+The bindings cleanse native scratch copies where practical, but cannot wipe caller-provided Kotlin arrays or returned secret objects. Upstream's enrollment, refresh, masking, and resharing round steps are internal at the pinned revision and are not exposed as public lifecycle orchestration here. `ConfederationTest` and `ConfederationVectorsTest` demonstrate the supported call sequences.
+
 ## Building
 
 **secp256k1-kmp** is a [Kotlin Multiplatform](https://kotlinlang.org/docs/multiplatform.html) wrapper for Bitcoin Core's [secp256k1 library](https://github.com/bitcoin-core/secp256k1).
