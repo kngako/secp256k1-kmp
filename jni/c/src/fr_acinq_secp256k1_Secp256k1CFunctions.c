@@ -4902,3 +4902,420 @@ JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1fr
     free(ser);
     return result;
 }
+
+/*
+ * The distributed DKG step interface (zkp implementation plan section 3.8). Outputs of known
+ * size are written into caller-allocated arrays whose lengths the Kotlin side takes from
+ * secp256k1_confederation_dkg_message_sizes; faults are written to a two-element int array
+ * {code, index}, the index -1 for no specific role. The return value is the native result.
+ */
+
+static int put_confederation_bytes(JNIEnv* penv, jbyteArray jout, const unsigned char* data, size_t len, const char* name)
+{
+    if (jout == NULL) {
+        JNI_ThrowNull(penv, name);
+        return 0;
+    }
+    if ((*penv)->GetArrayLength(penv, jout) != (jsize)len) {
+        JNI_ThrowSize(penv, name, (int)len);
+        return 0;
+    }
+    (*penv)->SetByteArrayRegion(penv, jout, 0, (jsize)len, (const jbyte*)data);
+    return 1;
+}
+
+static int put_confederation_fault(JNIEnv* penv, jintArray jfault, secp256k1_confederation_fault_code code, uint32_t index)
+{
+    jint values[2];
+    if (jfault == NULL || (*penv)->GetArrayLength(penv, jfault) != 2) {
+        JNI_ThrowSecp256k1(penv, "fault output must hold two ints");
+        return 0;
+    }
+    values[0] = (jint)code;
+    values[1] = index == SECP256K1_CONFEDERATION_NO_SPECIFIC_ROLE ? -1 : (jint)index;
+    (*penv)->SetIntArrayRegion(penv, jfault, 0, 2, values);
+    return 1;
+}
+
+static int check_confederation_role(JNIEnv* penv, jint jgroupid, jint jadminid)
+{
+    if (jgroupid < 0 || jgroupid >= SECP256K1_CONFEDERATION_MAX_GROUPS || jadminid < 0 || jadminid >= SECP256K1_CONFEDERATION_MAX_ROLES) {
+        JNI_ThrowSecp256k1(penv, "invalid confederation role");
+        return 0;
+    }
+    return 1;
+}
+
+JNIEXPORT jintArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1message_1sizes(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    size_t sizes[5];
+    jint values[5];
+    jintArray out;
+    int i;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    CHECKRESULT(!secp256k1_confederation_dkg_message_sizes(ctx, &rpd, &sizes[0], &sizes[1], &sizes[2], &sizes[3], &sizes[4]), "secp256k1_confederation_dkg_message_sizes failed");
+    for (i = 0; i < 5; i++) values[i] = (jint)sizes[i];
+    out = (*penv)->NewIntArray(penv, 5);
+    CHECKRESULT(out == NULL, "memory allocation failed");
+    (*penv)->SetIntArrayRegion(penv, out, 0, 5, values);
+    return out;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1step1(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jint jgroupid, jint jadminid, jbyteArray jhostseckey, jbyteArray jdealerseed, jbyteArray jsessionseed, jbyteArray jrecordout, jbyteArray jciphertextsout)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    unsigned char hostseckey[32], dealer_seed[32], session_seed[32];
+    unsigned char* record = NULL;
+    unsigned char* ciphertexts = NULL;
+    size_t record_len = 0, ciphertexts_len = 0;
+    int ok = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!check_confederation_role(penv, jgroupid, jadminid)) return 0;
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    CHECKRESULT(!secp256k1_confederation_dkg_message_sizes(ctx, &rpd, &record_len, &ciphertexts_len, NULL, NULL, NULL), "invalid opaque RPD");
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return 0;
+    if (!get_bytes32(penv, jdealerseed, dealer_seed, "dealer seed")) goto cleanup;
+    if (!get_bytes32(penv, jsessionseed, session_seed, "session seed")) goto cleanup;
+    record = malloc(record_len);
+    ciphertexts = malloc(ciphertexts_len);
+    if (record == NULL || ciphertexts == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_dkg_participant_step1(ctx, record, &record_len, ciphertexts, &ciphertexts_len, &rpd, (uint32_t)jgroupid, (uint32_t)jadminid, hostseckey, dealer_seed, session_seed)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_dkg_participant_step1 failed");
+        goto cleanup;
+    }
+    if (!put_confederation_bytes(penv, jrecordout, record, record_len, "dealer record")) goto cleanup;
+    if (!put_confederation_bytes(penv, jciphertextsout, ciphertexts, ciphertexts_len, "ciphertext vector")) goto cleanup;
+    ok = 1;
+cleanup:
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    jni_confederation_clear(dealer_seed, sizeof(dealer_seed));
+    free(record);
+    free(ciphertexts);
+    return ok;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1coordinator_1step1(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jsessionseed, jbyteArray jrecords, jbyteArray jciphertexts, jbyteArray jbroadcastout, jintArray jfault)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_fault_code fault = SECP256K1_CONFEDERATION_FAULT_INVALID_INPUT;
+    uint32_t fault_index = SECP256K1_CONFEDERATION_NO_SPECIFIC_ROLE;
+    unsigned char session_seed[32];
+    unsigned char *records = NULL, *ciphertexts = NULL, *broadcast = NULL;
+    size_t records_len = 0, ciphertexts_len = 0, broadcast_len = 0;
+    int result = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    CHECKRESULT(!secp256k1_confederation_dkg_message_sizes(ctx, &rpd, NULL, NULL, &broadcast_len, NULL, NULL), "invalid opaque RPD");
+    if (!get_bytes32(penv, jsessionseed, session_seed, "session seed")) return 0;
+    if (!get_var_bytes(penv, jrecords, &records, &records_len, "dealer records")) return 0;
+    if (!get_var_bytes(penv, jciphertexts, &ciphertexts, &ciphertexts_len, "ciphertext vectors")) goto cleanup;
+    CHECKRESULT1(records == NULL || ciphertexts == NULL, "records and ciphertexts cannot be null", free(records); free(ciphertexts));
+    broadcast = malloc(broadcast_len);
+    if (broadcast == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        goto cleanup;
+    }
+    result = secp256k1_confederation_dkg_coordinator_step1(ctx, &fault, &fault_index, broadcast, &broadcast_len, &rpd, session_seed, records, records_len, ciphertexts, ciphertexts_len);
+    if (!put_confederation_fault(penv, jfault, fault, fault_index)) { result = 0; goto cleanup; }
+    if (result && !put_confederation_bytes(penv, jbroadcastout, broadcast, broadcast_len, "broadcast")) result = 0;
+cleanup:
+    free(records);
+    free(ciphertexts);
+    free(broadcast);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1derive_1ksd(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jbroadcast)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    unsigned char* broadcast = NULL;
+    size_t broadcast_len = 0;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_var_bytes(penv, jbroadcast, &broadcast, &broadcast_len, "broadcast")) return NULL;
+    CHECKRESULT(broadcast == NULL, "broadcast cannot be null");
+    result = secp256k1_confederation_dkg_derive_ksd(ctx, &ksd, &rpd, broadcast, broadcast_len);
+    free(broadcast);
+    CHECKRESULT(!result, "secp256k1_confederation_dkg_derive_ksd failed");
+    return copy_bytes_to_java(penv, ksd.data, sizeof(ksd.data));
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1genesis_1prepare(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jksd, jbyteArray jhashout)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_transition transition;
+    unsigned char hash[32];
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &ksd, &rpd)) return NULL;
+    CHECKRESULT(!secp256k1_confederation_dkg_genesis_prepare(ctx, &transition, hash, &rpd, &ksd), "secp256k1_confederation_dkg_genesis_prepare failed");
+    if (!put_confederation_bytes(penv, jhashout, hash, 32, "transition hash")) return NULL;
+    return copy_bytes_to_java(penv, transition.data, sizeof(transition.data));
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1step2(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jint jgroupid, jint jadminid, jbyteArray jhostseckey, jbyteArray jsessionseed, jbyteArray jownrecord, jbyteArray jbroadcast, jbyteArray jksdout, jbyteArray jhashout, jbyteArray jauthorizationout, jintArray jfault)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_fault_code fault = SECP256K1_CONFEDERATION_FAULT_INVALID_INPUT;
+    uint32_t fault_index = SECP256K1_CONFEDERATION_NO_SPECIFIC_ROLE;
+    unsigned char hostseckey[32], session_seed[32], hash[32], authorization[64];
+    unsigned char *own_record = NULL, *broadcast = NULL;
+    size_t own_record_len = 0, broadcast_len = 0;
+    int result = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!check_confederation_role(penv, jgroupid, jadminid)) return 0;
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return 0;
+    if (!get_bytes32(penv, jsessionseed, session_seed, "session seed")) goto cleanup;
+    if (!get_var_bytes(penv, jownrecord, &own_record, &own_record_len, "own record")) goto cleanup;
+    if (!get_var_bytes(penv, jbroadcast, &broadcast, &broadcast_len, "broadcast")) goto cleanup;
+    if (own_record == NULL || broadcast == NULL) {
+        JNI_ThrowSecp256k1(penv, "own record and broadcast cannot be null");
+        goto cleanup;
+    }
+    result = secp256k1_confederation_dkg_participant_step2(ctx, &fault, &fault_index, &ksd, hash, authorization, &rpd, (uint32_t)jgroupid, (uint32_t)jadminid, hostseckey, session_seed, own_record, own_record_len, broadcast, broadcast_len);
+    if (!put_confederation_fault(penv, jfault, fault, fault_index)) { result = 0; goto cleanup; }
+    if (result && (!put_confederation_bytes(penv, jksdout, ksd.data, sizeof(ksd.data), "KSD")
+            || !put_confederation_bytes(penv, jhashout, hash, 32, "transition hash")
+            || !put_confederation_bytes(penv, jauthorizationout, authorization, 64, "authorization"))) {
+        result = 0;
+    }
+cleanup:
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    free(own_record);
+    free(broadcast);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1evidence_1list_1write(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jobjectArray jsignatures)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    unsigned char *signatures = NULL, *out = NULL;
+    size_t roles = 0, out_len = 0;
+    jsize i, n;
+    jbyteArray result = NULL;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    CHECKRESULT(!confederation_role_count(ctx, &rpd, &roles), "could not determine RPD role count");
+    CHECKRESULT(!secp256k1_confederation_dkg_message_sizes(ctx, &rpd, NULL, NULL, NULL, &out_len, NULL), "invalid opaque RPD");
+    CHECKRESULT(jsignatures == NULL, "signatures cannot be null");
+    n = (*penv)->GetArrayLength(penv, jsignatures);
+    CHECKRESULT((size_t)n != roles, "signatures must match the RPD role count");
+    signatures = malloc(64 * roles);
+    out = malloc(out_len);
+    if (signatures == NULL || out == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        goto cleanup;
+    }
+    for (i = 0; i < n; i++) {
+        jbyteArray jsig = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jsignatures, i);
+        int ok = get_bytes(penv, jsig, 64, signatures + 64 * (size_t)i, "signature");
+        (*penv)->DeleteLocalRef(penv, jsig);
+        if (!ok) goto cleanup;
+    }
+    if (!secp256k1_confederation_dkg_evidence_list_write(ctx, out, &out_len, &rpd, signatures)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_dkg_evidence_list_write failed");
+        goto cleanup;
+    }
+    result = copy_bytes_to_java(penv, out, out_len);
+cleanup:
+    free(signatures);
+    free(out);
+    return result;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1verify_1evidence(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jhash, jint jpurpose, jbyteArray jlist, jintArray jfault)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_fault_code fault = SECP256K1_CONFEDERATION_FAULT_INVALID_INPUT;
+    uint32_t fault_index = SECP256K1_CONFEDERATION_NO_SPECIFIC_ROLE;
+    unsigned char hash[32];
+    unsigned char* list = NULL;
+    size_t list_len = 0;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jpurpose != SECP256K1_CONFEDERATION_EVIDENCE_AUTHORIZE && jpurpose != SECP256K1_CONFEDERATION_EVIDENCE_ACKNOWLEDGE, "invalid evidence purpose");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    if (!get_bytes32(penv, jhash, hash, "transition hash")) return 0;
+    if (!get_var_bytes(penv, jlist, &list, &list_len, "evidence list")) return 0;
+    CHECKRESULT(list == NULL, "evidence list cannot be null");
+    result = secp256k1_confederation_dkg_verify_evidence(ctx, &fault, &fault_index, &rpd, hash, (unsigned int)jpurpose, list, list_len);
+    free(list);
+    if (!put_confederation_fault(penv, jfault, fault, fault_index)) return 0;
+    return result;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1acknowledge(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jint jgroupid, jint jadminid, jbyteArray jhostseckey, jbyteArray jhash, jbyteArray jauthorizations, jbyteArray jacknowledgmentout, jintArray jfault)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_fault_code fault = SECP256K1_CONFEDERATION_FAULT_INVALID_INPUT;
+    uint32_t fault_index = SECP256K1_CONFEDERATION_NO_SPECIFIC_ROLE;
+    unsigned char hostseckey[32], hash[32], acknowledgment[64];
+    unsigned char* authorizations = NULL;
+    size_t authorizations_len = 0;
+    int result = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!check_confederation_role(penv, jgroupid, jadminid)) return 0;
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return 0;
+    if (!get_bytes32(penv, jhash, hash, "transition hash")) goto cleanup;
+    if (!get_var_bytes(penv, jauthorizations, &authorizations, &authorizations_len, "authorizations")) goto cleanup;
+    if (authorizations == NULL) {
+        JNI_ThrowSecp256k1(penv, "authorizations cannot be null");
+        goto cleanup;
+    }
+    result = secp256k1_confederation_dkg_participant_acknowledge(ctx, &fault, &fault_index, acknowledgment, &rpd, (uint32_t)jgroupid, (uint32_t)jadminid, hostseckey, hash, authorizations, authorizations_len);
+    if (!put_confederation_fault(penv, jfault, fault, fault_index)) { result = 0; goto cleanup; }
+    if (result && !put_confederation_bytes(penv, jacknowledgmentout, acknowledgment, 64, "acknowledgment")) result = 0;
+cleanup:
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    free(authorizations);
+    return result;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1coordinator_1finalize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jksd, jbyteArray jauthorizations, jbyteArray jacknowledgments, jbyteArray jtransitionout, jintArray jfault)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_transition transition;
+    secp256k1_confederation_fault_code fault = SECP256K1_CONFEDERATION_FAULT_INVALID_INPUT;
+    uint32_t fault_index = SECP256K1_CONFEDERATION_NO_SPECIFIC_ROLE;
+    unsigned char *authorizations = NULL, *acknowledgments = NULL;
+    size_t authorizations_len = 0, acknowledgments_len = 0;
+    int result = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &ksd, &rpd)) return 0;
+    if (!get_var_bytes(penv, jauthorizations, &authorizations, &authorizations_len, "authorizations")) return 0;
+    if (!get_var_bytes(penv, jacknowledgments, &acknowledgments, &acknowledgments_len, "acknowledgments")) goto cleanup;
+    if (authorizations == NULL || acknowledgments == NULL) {
+        JNI_ThrowSecp256k1(penv, "evidence lists cannot be null");
+        goto cleanup;
+    }
+    result = secp256k1_confederation_dkg_coordinator_finalize(ctx, &fault, &fault_index, &transition, &rpd, &ksd, authorizations, authorizations_len, acknowledgments, acknowledgments_len);
+    if (!put_confederation_fault(penv, jfault, fault, fault_index)) { result = 0; goto cleanup; }
+    if (result && !put_confederation_bytes(penv, jtransitionout, transition.data, sizeof(transition.data), "transition")) result = 0;
+cleanup:
+    free(authorizations);
+    free(acknowledgments);
+    return result;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1finalize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jtransition, jbyteArray jrpd, jbyteArray jksd, jint jgroupid, jint jadminid, jbyteArray jhostseckey, jbyteArray jownrecord, jbyteArray jbroadcast, jbyteArray jrecoverynonce, jbyteArray jshareout, jbyteArray jrecoveryout)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_transition transition;
+    secp256k1_confederation_share share;
+    secp256k1_confederation_recovery recovery;
+    unsigned char hostseckey[32], recovery_nonce[32];
+    unsigned char *own_record = NULL, *broadcast = NULL;
+    size_t own_record_len = 0, broadcast_len = 0;
+    int result = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!check_confederation_role(penv, jgroupid, jadminid)) return 0;
+    if (!get_bytes(penv, jtransition, sizeof(transition.data), transition.data, "opaque transition")) return 0;
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &ksd, &rpd)) return 0;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return 0;
+    if (!get_bytes32(penv, jrecoverynonce, recovery_nonce, "recovery nonce")) goto cleanup;
+    if (!get_var_bytes(penv, jownrecord, &own_record, &own_record_len, "own record")) goto cleanup;
+    if (!get_var_bytes(penv, jbroadcast, &broadcast, &broadcast_len, "broadcast")) goto cleanup;
+    if (own_record == NULL || broadcast == NULL) {
+        JNI_ThrowSecp256k1(penv, "own record and broadcast cannot be null");
+        goto cleanup;
+    }
+    result = secp256k1_confederation_dkg_participant_finalize(ctx, &share, &recovery, &transition, &rpd, &ksd, (uint32_t)jgroupid, (uint32_t)jadminid, hostseckey, own_record, own_record_len, broadcast, broadcast_len, recovery_nonce);
+    if (result && (!put_confederation_bytes(penv, jshareout, share.data, sizeof(share.data), "share")
+            || !put_confederation_bytes(penv, jrecoveryout, recovery.data, sizeof(recovery.data), "recovery"))) {
+        result = 0;
+    }
+cleanup:
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    jni_confederation_clear(recovery_nonce, sizeof(recovery_nonce));
+    jni_confederation_clear(share.data, sizeof(share.data));
+    jni_confederation_clear(recovery.data, sizeof(recovery.data));
+    free(own_record);
+    free(broadcast);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1investigation_1response(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jsessionseed, jint jgroupid, jint jadminid, jbyteArray jciphertexts)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    unsigned char session_seed[32];
+    unsigned char *ciphertexts = NULL, *out = NULL;
+    size_t ciphertexts_len = 0, out_len = 0;
+    jbyteArray result = NULL;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!check_confederation_role(penv, jgroupid, jadminid)) return NULL;
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    CHECKRESULT(!secp256k1_confederation_dkg_message_sizes(ctx, &rpd, NULL, NULL, NULL, NULL, &out_len), "invalid opaque RPD");
+    if (!get_bytes32(penv, jsessionseed, session_seed, "session seed")) return NULL;
+    if (!get_var_bytes(penv, jciphertexts, &ciphertexts, &ciphertexts_len, "ciphertexts")) return NULL;
+    CHECKRESULT(ciphertexts == NULL, "ciphertexts cannot be null");
+    out = malloc(out_len);
+    if (out == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_dkg_investigation_response(ctx, out, &out_len, &rpd, session_seed, (uint32_t)jgroupid, (uint32_t)jadminid, ciphertexts, ciphertexts_len)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_dkg_investigation_response failed");
+        goto cleanup;
+    }
+    result = copy_bytes_to_java(penv, out, out_len);
+cleanup:
+    free(ciphertexts);
+    free(out);
+    return result;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1investigate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jint jgroupid, jint jadminid, jbyteArray jhostseckey, jbyteArray jbroadcast, jbyteArray jresponses, jintArray jfault)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_fault_code fault = SECP256K1_CONFEDERATION_FAULT_INVALID_INPUT;
+    uint32_t fault_index = SECP256K1_CONFEDERATION_NO_SPECIFIC_ROLE;
+    unsigned char hostseckey[32];
+    unsigned char *broadcast = NULL, *responses = NULL;
+    size_t broadcast_len = 0, responses_len = 0;
+    int result = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!check_confederation_role(penv, jgroupid, jadminid)) return 0;
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return 0;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return 0;
+    if (!get_var_bytes(penv, jbroadcast, &broadcast, &broadcast_len, "broadcast")) goto cleanup;
+    if (!get_var_bytes(penv, jresponses, &responses, &responses_len, "responses")) goto cleanup;
+    if (broadcast == NULL || responses == NULL) {
+        JNI_ThrowSecp256k1(penv, "broadcast and responses cannot be null");
+        goto cleanup;
+    }
+    result = secp256k1_confederation_dkg_investigate(ctx, &fault, &fault_index, &rpd, (uint32_t)jgroupid, (uint32_t)jadminid, hostseckey, broadcast, broadcast_len, responses, responses_len);
+    if (!put_confederation_fault(penv, jfault, fault, fault_index)) result = 0;
+cleanup:
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    free(broadcast);
+    free(responses);
+    return result;
+}

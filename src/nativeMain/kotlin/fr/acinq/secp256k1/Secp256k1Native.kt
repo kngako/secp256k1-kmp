@@ -2170,6 +2170,186 @@ public object Secp256k1Native : Secp256k1 {
         }
     }
 
+    private fun requireConfederationRole(groupId: UInt, adminId: UInt) {
+        require(groupId < Secp256k1.CONFEDERATION_MAX_GROUPS.toUInt()) { "invalid group id" }
+        require(adminId < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt()) { "invalid admin id" }
+    }
+
+    private fun require32(value: ByteArray, name: String) = require(value.size == 32) { "$name must be 32 bytes" }
+
+    /* A fault code and index, read back as values. The C enum is int-sized, so the code is read through a UInt
+     * whichever way cinterop maps the enum. */
+    private class ConfederationFaultOut(val code: UIntVar, val index: UIntVar) {
+        fun fault(): ConfederationFault = ConfederationFault(code.value.toInt(), if (index.value == UInt.MAX_VALUE) null else index.value)
+    }
+
+    private fun MemScope.allocConfederationFault(): ConfederationFaultOut {
+        val out = ConfederationFaultOut(alloc<UIntVar>(), alloc<UIntVar>())
+        out.code.value = ConfederationFault.INVALID_INPUT.toUInt()
+        out.index.value = UInt.MAX_VALUE
+        return out
+    }
+
+    private fun <T> confederationStep(result: Int, fault: ConfederationFaultOut, name: String, value: () -> T): ConfederationStep<T> {
+        val f = fault.fault()
+        return when {
+            result == 1 -> ConfederationStep.Done(value())
+            f.code == ConfederationFault.INVALID_INPUT || f.code == ConfederationFault.NONE -> throw Secp256k1Exception("$name() failed")
+            else -> ConfederationStep.Faulted(f)
+        }
+    }
+
+    private fun MemScope.confederationDkgSizes(rpd: secp256k1_confederation_rpd): ConfederationDkgMessageSizes {
+        val sizes = List(5) { alloc<size_tVar>() }
+        secp256k1_confederation_dkg_message_sizes(ctx, rpd.ptr, sizes[0].ptr, sizes[1].ptr, sizes[2].ptr, sizes[3].ptr, sizes[4].ptr)
+            .requireSuccess("secp256k1_confederation_dkg_message_sizes() failed")
+        return ConfederationDkgMessageSizes(sizes[0].value.toInt(), sizes[1].value.toInt(), sizes[2].value.toInt(), sizes[3].value.toInt(), sizes[4].value.toInt())
+    }
+
+    override fun confederationDkgMessageSizes(rpd: ByteArray): ConfederationDkgMessageSizes = memScoped {
+        confederationDkgSizes(allocConfederationRpd(rpd))
+    }
+
+    override fun confederationDkgParticipantStep1(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, dealerSeed32: ByteArray, sessionSeed32: ByteArray): ConfederationDkgDealing = memScoped {
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(dealerSeed32, "dealer seed")
+        require32(sessionSeed32, "session seed")
+        val nRpd = allocConfederationRpd(rpd)
+        val sizes = confederationDkgSizes(nRpd)
+        val record = ByteArray(sizes.record)
+        val ciphertexts = ByteArray(sizes.ciphertexts)
+        val recordLen = alloc<size_tVar>()
+        val ciphertextsLen = alloc<size_tVar>()
+        recordLen.value = sizes.record.convert()
+        ciphertextsLen.value = sizes.ciphertexts.convert()
+        secp256k1_confederation_dkg_participant_step1(ctx, toNat(record), recordLen.ptr, toNat(ciphertexts), ciphertextsLen.ptr, nRpd.ptr, groupId, adminId, toNat(hostseckey32), toNat(dealerSeed32), toNat(sessionSeed32))
+            .requireSuccess("secp256k1_confederation_dkg_participant_step1() failed")
+        ConfederationDkgDealing(record, ciphertexts)
+    }
+
+    override fun confederationDkgCoordinatorStep1(rpd: ByteArray, sessionSeed32: ByteArray, records: ByteArray, ciphertexts: ByteArray): ConfederationStep<ByteArray> = memScoped {
+        require32(sessionSeed32, "session seed")
+        val nRpd = allocConfederationRpd(rpd)
+        val broadcast = ByteArray(confederationDkgSizes(nRpd).broadcast)
+        val broadcastLen = alloc<size_tVar>()
+        broadcastLen.value = broadcast.size.convert()
+        val fault = allocConfederationFault()
+        val result = secp256k1_confederation_dkg_coordinator_step1(ctx, fault.code.ptr.reinterpret(), fault.index.ptr, toNat(broadcast), broadcastLen.ptr, nRpd.ptr, toNat(sessionSeed32), toNatAllowEmpty(records), records.size.convert(), toNatAllowEmpty(ciphertexts), ciphertexts.size.convert())
+        confederationStep(result, fault, "secp256k1_confederation_dkg_coordinator_step1") { broadcast }
+    }
+
+    override fun confederationDkgDeriveKsd(rpd: ByteArray, broadcast: ByteArray): ByteArray = memScoped {
+        val nRpd = allocConfederationRpd(rpd)
+        val nKsd = alloc<secp256k1_confederation_ksd>()
+        secp256k1_confederation_dkg_derive_ksd(ctx, nKsd.ptr, nRpd.ptr, toNatAllowEmpty(broadcast), broadcast.size.convert()).requireSuccess("secp256k1_confederation_dkg_derive_ksd() failed")
+        nKsd.ptr.readBytes(Secp256k1.CONFEDERATION_KSD_SIZE)
+    }
+
+    override fun confederationDkgGenesisPrepare(rpd: ByteArray, ksd: ByteArray): ConfederationDkgGenesis = memScoped {
+        val state = allocConfederationState(rpd, ksd)
+        val nTransition = alloc<secp256k1_confederation_transition>()
+        val hash = ByteArray(32)
+        secp256k1_confederation_dkg_genesis_prepare(ctx, nTransition.ptr, toNat(hash), state.rpd.ptr, state.ksd.ptr).requireSuccess("secp256k1_confederation_dkg_genesis_prepare() failed")
+        ConfederationDkgGenesis(nTransition.ptr.readBytes(Secp256k1.CONFEDERATION_TRANSITION_SIZE), hash)
+    }
+
+    override fun confederationDkgParticipantStep2(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, sessionSeed32: ByteArray, ownRecord: ByteArray, broadcast: ByteArray): ConfederationStep<ConfederationDkgAuthorization> = memScoped {
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(sessionSeed32, "session seed")
+        val nRpd = allocConfederationRpd(rpd)
+        val nKsd = alloc<secp256k1_confederation_ksd>()
+        val hash = ByteArray(32)
+        val authorization = ByteArray(64)
+        val fault = allocConfederationFault()
+        val result = secp256k1_confederation_dkg_participant_step2(ctx, fault.code.ptr.reinterpret(), fault.index.ptr, nKsd.ptr, toNat(hash), toNat(authorization), nRpd.ptr, groupId, adminId, toNat(hostseckey32), toNat(sessionSeed32), toNatAllowEmpty(ownRecord), ownRecord.size.convert(), toNatAllowEmpty(broadcast), broadcast.size.convert())
+        confederationStep(result, fault, "secp256k1_confederation_dkg_participant_step2") {
+            ConfederationDkgAuthorization(nKsd.ptr.readBytes(Secp256k1.CONFEDERATION_KSD_SIZE), hash, authorization)
+        }
+    }
+
+    override fun confederationDkgEvidenceListWrite(rpd: ByteArray, signatures64: Array<ByteArray>): ByteArray = memScoped {
+        requireConfederationRoleValues(signatures64, "signatures", 64)
+        val nRpd = allocConfederationRpd(rpd)
+        if (signatures64.size != confederationRoleCount(nRpd)) throw Secp256k1Exception("signatures must match the RPD role count")
+        val out = ByteArray(confederationDkgSizes(nRpd).evidenceList)
+        val outLen = alloc<size_tVar>()
+        outLen.value = out.size.convert()
+        secp256k1_confederation_dkg_evidence_list_write(ctx, toNat(out), outLen.ptr, nRpd.ptr, toNat(flatBytes(signatures64, 64, "signature")))
+            .requireSuccess("secp256k1_confederation_dkg_evidence_list_write() failed")
+        out.copyOf(outLen.value.toInt())
+    }
+
+    override fun confederationDkgVerifyEvidence(rpd: ByteArray, transitionHash32: ByteArray, purpose: Int, evidenceList: ByteArray): ConfederationFault? = memScoped {
+        require32(transitionHash32, "transition hash")
+        require(purpose == Secp256k1.CONFEDERATION_EVIDENCE_AUTHORIZE || purpose == Secp256k1.CONFEDERATION_EVIDENCE_ACKNOWLEDGE) { "invalid evidence purpose" }
+        val nRpd = allocConfederationRpd(rpd)
+        val fault = allocConfederationFault()
+        val result = secp256k1_confederation_dkg_verify_evidence(ctx, fault.code.ptr.reinterpret(), fault.index.ptr, nRpd.ptr, toNat(transitionHash32), purpose.toUInt(), toNatAllowEmpty(evidenceList), evidenceList.size.convert())
+        confederationStep(result, fault, "secp256k1_confederation_dkg_verify_evidence") { Unit }.faultOrNull()
+    }
+
+    override fun confederationDkgParticipantAcknowledge(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, transitionHash32: ByteArray, authorizations: ByteArray): ConfederationStep<ByteArray> = memScoped {
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(transitionHash32, "transition hash")
+        val nRpd = allocConfederationRpd(rpd)
+        val acknowledgment = ByteArray(64)
+        val fault = allocConfederationFault()
+        val result = secp256k1_confederation_dkg_participant_acknowledge(ctx, fault.code.ptr.reinterpret(), fault.index.ptr, toNat(acknowledgment), nRpd.ptr, groupId, adminId, toNat(hostseckey32), toNat(transitionHash32), toNatAllowEmpty(authorizations), authorizations.size.convert())
+        confederationStep(result, fault, "secp256k1_confederation_dkg_participant_acknowledge") { acknowledgment }
+    }
+
+    override fun confederationDkgCoordinatorFinalize(rpd: ByteArray, ksd: ByteArray, authorizations: ByteArray, acknowledgments: ByteArray): ConfederationStep<ByteArray> = memScoped {
+        val state = allocConfederationState(rpd, ksd)
+        val nTransition = alloc<secp256k1_confederation_transition>()
+        val fault = allocConfederationFault()
+        val result = secp256k1_confederation_dkg_coordinator_finalize(ctx, fault.code.ptr.reinterpret(), fault.index.ptr, nTransition.ptr, state.rpd.ptr, state.ksd.ptr, toNatAllowEmpty(authorizations), authorizations.size.convert(), toNatAllowEmpty(acknowledgments), acknowledgments.size.convert())
+        confederationStep(result, fault, "secp256k1_confederation_dkg_coordinator_finalize") { nTransition.ptr.readBytes(Secp256k1.CONFEDERATION_TRANSITION_SIZE) }
+    }
+
+    override fun confederationDkgParticipantFinalize(transition: ByteArray, rpd: ByteArray, ksd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, ownRecord: ByteArray, broadcast: ByteArray, recoveryNonce32: ByteArray): ConfederationDkgShare = memScoped {
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(recoveryNonce32, "recovery nonce")
+        val nTransition = allocConfederationTransition(transition)
+        val state = allocConfederationState(rpd, ksd)
+        val share = alloc<secp256k1_confederation_share>()
+        val recovery = alloc<secp256k1_confederation_recovery>()
+        try {
+            secp256k1_confederation_dkg_participant_finalize(ctx, share.ptr, recovery.ptr, nTransition.ptr, state.rpd.ptr, state.ksd.ptr, groupId, adminId, toNat(hostseckey32), toNatAllowEmpty(ownRecord), ownRecord.size.convert(), toNatAllowEmpty(broadcast), broadcast.size.convert(), toNat(recoveryNonce32))
+                .requireSuccess("secp256k1_confederation_dkg_participant_finalize() failed")
+            ConfederationDkgShare(share.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE), recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE))
+        } finally {
+            memset(share.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+            memset(recovery.ptr, 0, Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE.convert())
+        }
+    }
+
+    override fun confederationDkgInvestigationResponse(rpd: ByteArray, sessionSeed32: ByteArray, dealerGroupId: UInt, dealerAdminId: UInt, ciphertexts: ByteArray): ByteArray = memScoped {
+        require32(sessionSeed32, "session seed")
+        requireConfederationRole(dealerGroupId, dealerAdminId)
+        val nRpd = allocConfederationRpd(rpd)
+        val out = ByteArray(confederationDkgSizes(nRpd).investigationResponse)
+        val outLen = alloc<size_tVar>()
+        outLen.value = out.size.convert()
+        secp256k1_confederation_dkg_investigation_response(ctx, toNat(out), outLen.ptr, nRpd.ptr, toNat(sessionSeed32), dealerGroupId, dealerAdminId, toNatAllowEmpty(ciphertexts), ciphertexts.size.convert())
+            .requireSuccess("secp256k1_confederation_dkg_investigation_response() failed")
+        out.copyOf(outLen.value.toInt())
+    }
+
+    override fun confederationDkgInvestigate(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, broadcast: ByteArray, responses: ByteArray): ConfederationFault = memScoped {
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        val nRpd = allocConfederationRpd(rpd)
+        val fault = allocConfederationFault()
+        val result = secp256k1_confederation_dkg_investigate(ctx, fault.code.ptr.reinterpret(), fault.index.ptr, nRpd.ptr, groupId, adminId, toNat(hostseckey32), toNatAllowEmpty(broadcast), broadcast.size.convert(), toNatAllowEmpty(responses), responses.size.convert())
+        val f = fault.fault()
+        if (result != 1 && (f.code == ConfederationFault.INVALID_INPUT || f.code == ConfederationFault.NONE)) throw Secp256k1Exception("secp256k1_confederation_dkg_investigate() failed")
+        f
+    }
+
     override fun confederationKsdPubkeyGet(ksd: ByteArray, rpd: ByteArray): ByteArray = memScoped {
         val state = allocConfederationState(rpd, ksd)
         val pubkey = alloc<secp256k1_xonly_pubkey>()

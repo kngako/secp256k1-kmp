@@ -397,4 +397,29 @@ public class Secp256k1CFunctions {
     public static native byte[] secp256k1_confederation_sign(long ctx, byte[] rpd, byte[] ksd, byte[][] shares, byte[][] hostseckeys32, byte[] signing_session_id32, int[] group_ids, int[] inner_counts, int[] admin_ids, byte[] tweak_sequence, byte[] message32);
 
     public static native byte[] secp256k1_confederation_ksd_pubkey_get(long ctx, byte[] ksd, byte[] rpd);
+    public static native int[] secp256k1_confederation_dkg_message_sizes(long ctx, byte[] rpd);
+
+    public static native int secp256k1_confederation_dkg_participant_step1(long ctx, byte[] rpd, int group_id, int admin_id, byte[] hostseckey32, byte[] dealer_seed32, byte[] session_seed32, byte[] record_out, byte[] ciphertexts_out);
+
+    public static native int secp256k1_confederation_dkg_coordinator_step1(long ctx, byte[] rpd, byte[] session_seed32, byte[] records, byte[] ciphertexts, byte[] broadcast_out, int[] fault);
+
+    public static native byte[] secp256k1_confederation_dkg_derive_ksd(long ctx, byte[] rpd, byte[] broadcast);
+
+    public static native byte[] secp256k1_confederation_dkg_genesis_prepare(long ctx, byte[] rpd, byte[] ksd, byte[] transition_hash_out);
+
+    public static native int secp256k1_confederation_dkg_participant_step2(long ctx, byte[] rpd, int group_id, int admin_id, byte[] hostseckey32, byte[] session_seed32, byte[] own_record, byte[] broadcast, byte[] ksd_out, byte[] transition_hash_out, byte[] authorization_out, int[] fault);
+
+    public static native byte[] secp256k1_confederation_dkg_evidence_list_write(long ctx, byte[] rpd, byte[][] signatures64);
+
+    public static native int secp256k1_confederation_dkg_verify_evidence(long ctx, byte[] rpd, byte[] transition_hash32, int purpose, byte[] evidence_list, int[] fault);
+
+    public static native int secp256k1_confederation_dkg_participant_acknowledge(long ctx, byte[] rpd, int group_id, int admin_id, byte[] hostseckey32, byte[] transition_hash32, byte[] authorizations, byte[] acknowledgment_out, int[] fault);
+
+    public static native int secp256k1_confederation_dkg_coordinator_finalize(long ctx, byte[] rpd, byte[] ksd, byte[] authorizations, byte[] acknowledgments, byte[] transition_out, int[] fault);
+
+    public static native int secp256k1_confederation_dkg_participant_finalize(long ctx, byte[] transition, byte[] rpd, byte[] ksd, int group_id, int admin_id, byte[] hostseckey32, byte[] own_record, byte[] broadcast, byte[] recovery_nonce32, byte[] share_out, byte[] recovery_out);
+
+    public static native byte[] secp256k1_confederation_dkg_investigation_response(long ctx, byte[] rpd, byte[] session_seed32, int dealer_group_id, int dealer_admin_id, byte[] ciphertexts);
+
+    public static native int secp256k1_confederation_dkg_investigate(long ctx, byte[] rpd, int group_id, int admin_id, byte[] hostseckey32, byte[] broadcast, byte[] responses, int[] fault);
 }

@@ -1069,4 +1069,143 @@ public object Secp256k1Jni : Secp256k1 {
         require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
         return Secp256k1CFunctions.secp256k1_confederation_ksd_pubkey_get(Secp256k1Context.getContext(), ksd, rpd)
     }
+    private fun requireConfederationRole(groupId: UInt, adminId: UInt) {
+        require(groupId < Secp256k1.CONFEDERATION_MAX_GROUPS.toUInt()) { "invalid group id" }
+        require(adminId < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt()) { "invalid admin id" }
+    }
+
+    private fun requireRpd(rpd: ByteArray) = require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
+    private fun requireKsd(ksd: ByteArray) = require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
+    private fun require32(value: ByteArray, name: String) = require(value.size == 32) { "$name must be 32 bytes" }
+
+    /* The JNI step functions write {code, index} with -1 for no specific role. A fault of INVALID_INPUT is this
+     * caller's own input and raises; any other is a judgment on another party and is returned. */
+    private fun confederationFault(fault: IntArray): ConfederationFault =
+        ConfederationFault(fault[0], if (fault[1] < 0) null else fault[1].toUInt())
+
+    private fun <T> confederationStep(result: Int, fault: IntArray, name: String, value: () -> T): ConfederationStep<T> = when {
+        result == 1 -> ConfederationStep.Done(value())
+        fault[0] == ConfederationFault.INVALID_INPUT || fault[0] == ConfederationFault.NONE -> throw Secp256k1Exception("$name failed")
+        else -> ConfederationStep.Faulted(confederationFault(fault))
+    }
+
+    override fun confederationDkgMessageSizes(rpd: ByteArray): ConfederationDkgMessageSizes {
+        requireRpd(rpd)
+        val sizes = Secp256k1CFunctions.secp256k1_confederation_dkg_message_sizes(Secp256k1Context.getContext(), rpd)
+        return ConfederationDkgMessageSizes(sizes[0], sizes[1], sizes[2], sizes[3], sizes[4])
+    }
+
+    override fun confederationDkgParticipantStep1(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, dealerSeed32: ByteArray, sessionSeed32: ByteArray): ConfederationDkgDealing {
+        requireRpd(rpd)
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(dealerSeed32, "dealer seed")
+        require32(sessionSeed32, "session seed")
+        val sizes = confederationDkgMessageSizes(rpd)
+        val record = ByteArray(sizes.record)
+        val ciphertexts = ByteArray(sizes.ciphertexts)
+        Secp256k1CFunctions.secp256k1_confederation_dkg_participant_step1(Secp256k1Context.getContext(), rpd, groupId.toInt(), adminId.toInt(), hostseckey32, dealerSeed32, sessionSeed32, record, ciphertexts)
+        return ConfederationDkgDealing(record, ciphertexts)
+    }
+
+    override fun confederationDkgCoordinatorStep1(rpd: ByteArray, sessionSeed32: ByteArray, records: ByteArray, ciphertexts: ByteArray): ConfederationStep<ByteArray> {
+        requireRpd(rpd)
+        require32(sessionSeed32, "session seed")
+        val broadcast = ByteArray(confederationDkgMessageSizes(rpd).broadcast)
+        val fault = IntArray(2)
+        val result = Secp256k1CFunctions.secp256k1_confederation_dkg_coordinator_step1(Secp256k1Context.getContext(), rpd, sessionSeed32, records, ciphertexts, broadcast, fault)
+        return confederationStep(result, fault, "secp256k1_confederation_dkg_coordinator_step1") { broadcast }
+    }
+
+    override fun confederationDkgDeriveKsd(rpd: ByteArray, broadcast: ByteArray): ByteArray {
+        requireRpd(rpd)
+        return Secp256k1CFunctions.secp256k1_confederation_dkg_derive_ksd(Secp256k1Context.getContext(), rpd, broadcast)
+    }
+
+    override fun confederationDkgGenesisPrepare(rpd: ByteArray, ksd: ByteArray): ConfederationDkgGenesis {
+        requireRpd(rpd)
+        requireKsd(ksd)
+        val hash = ByteArray(32)
+        val transition = Secp256k1CFunctions.secp256k1_confederation_dkg_genesis_prepare(Secp256k1Context.getContext(), rpd, ksd, hash)
+        return ConfederationDkgGenesis(transition, hash)
+    }
+
+    override fun confederationDkgParticipantStep2(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, sessionSeed32: ByteArray, ownRecord: ByteArray, broadcast: ByteArray): ConfederationStep<ConfederationDkgAuthorization> {
+        requireRpd(rpd)
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(sessionSeed32, "session seed")
+        val ksd = ByteArray(Secp256k1.CONFEDERATION_KSD_SIZE)
+        val hash = ByteArray(32)
+        val authorization = ByteArray(64)
+        val fault = IntArray(2)
+        val result = Secp256k1CFunctions.secp256k1_confederation_dkg_participant_step2(Secp256k1Context.getContext(), rpd, groupId.toInt(), adminId.toInt(), hostseckey32, sessionSeed32, ownRecord, broadcast, ksd, hash, authorization, fault)
+        return confederationStep(result, fault, "secp256k1_confederation_dkg_participant_step2") { ConfederationDkgAuthorization(ksd, hash, authorization) }
+    }
+
+    override fun confederationDkgEvidenceListWrite(rpd: ByteArray, signatures64: Array<ByteArray>): ByteArray {
+        requireRpd(rpd)
+        requireConfederationRoleValues(signatures64, "signatures", 64)
+        return Secp256k1CFunctions.secp256k1_confederation_dkg_evidence_list_write(Secp256k1Context.getContext(), rpd, signatures64)
+    }
+
+    override fun confederationDkgVerifyEvidence(rpd: ByteArray, transitionHash32: ByteArray, purpose: Int, evidenceList: ByteArray): ConfederationFault? {
+        requireRpd(rpd)
+        require32(transitionHash32, "transition hash")
+        require(purpose == Secp256k1.CONFEDERATION_EVIDENCE_AUTHORIZE || purpose == Secp256k1.CONFEDERATION_EVIDENCE_ACKNOWLEDGE) { "invalid evidence purpose" }
+        val fault = IntArray(2)
+        val result = Secp256k1CFunctions.secp256k1_confederation_dkg_verify_evidence(Secp256k1Context.getContext(), rpd, transitionHash32, purpose, evidenceList, fault)
+        return confederationStep(result, fault, "secp256k1_confederation_dkg_verify_evidence") { Unit }.faultOrNull()
+    }
+
+    override fun confederationDkgParticipantAcknowledge(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, transitionHash32: ByteArray, authorizations: ByteArray): ConfederationStep<ByteArray> {
+        requireRpd(rpd)
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(transitionHash32, "transition hash")
+        val acknowledgment = ByteArray(64)
+        val fault = IntArray(2)
+        val result = Secp256k1CFunctions.secp256k1_confederation_dkg_participant_acknowledge(Secp256k1Context.getContext(), rpd, groupId.toInt(), adminId.toInt(), hostseckey32, transitionHash32, authorizations, acknowledgment, fault)
+        return confederationStep(result, fault, "secp256k1_confederation_dkg_participant_acknowledge") { acknowledgment }
+    }
+
+    override fun confederationDkgCoordinatorFinalize(rpd: ByteArray, ksd: ByteArray, authorizations: ByteArray, acknowledgments: ByteArray): ConfederationStep<ByteArray> {
+        requireRpd(rpd)
+        requireKsd(ksd)
+        val transition = ByteArray(Secp256k1.CONFEDERATION_TRANSITION_SIZE)
+        val fault = IntArray(2)
+        val result = Secp256k1CFunctions.secp256k1_confederation_dkg_coordinator_finalize(Secp256k1Context.getContext(), rpd, ksd, authorizations, acknowledgments, transition, fault)
+        return confederationStep(result, fault, "secp256k1_confederation_dkg_coordinator_finalize") { transition }
+    }
+
+    override fun confederationDkgParticipantFinalize(transition: ByteArray, rpd: ByteArray, ksd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, ownRecord: ByteArray, broadcast: ByteArray, recoveryNonce32: ByteArray): ConfederationDkgShare {
+        require(transition.size == Secp256k1.CONFEDERATION_TRANSITION_SIZE) { "invalid opaque transition size" }
+        requireRpd(rpd)
+        requireKsd(ksd)
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        require32(recoveryNonce32, "recovery nonce")
+        val share = ByteArray(Secp256k1.CONFEDERATION_SHARE_SIZE)
+        val recovery = ByteArray(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+        val result = Secp256k1CFunctions.secp256k1_confederation_dkg_participant_finalize(Secp256k1Context.getContext(), transition, rpd, ksd, groupId.toInt(), adminId.toInt(), hostseckey32, ownRecord, broadcast, recoveryNonce32, share, recovery)
+        if (result != 1) throw Secp256k1Exception("secp256k1_confederation_dkg_participant_finalize failed")
+        return ConfederationDkgShare(share, recovery)
+    }
+
+    override fun confederationDkgInvestigationResponse(rpd: ByteArray, sessionSeed32: ByteArray, dealerGroupId: UInt, dealerAdminId: UInt, ciphertexts: ByteArray): ByteArray {
+        requireRpd(rpd)
+        require32(sessionSeed32, "session seed")
+        requireConfederationRole(dealerGroupId, dealerAdminId)
+        return Secp256k1CFunctions.secp256k1_confederation_dkg_investigation_response(Secp256k1Context.getContext(), rpd, sessionSeed32, dealerGroupId.toInt(), dealerAdminId.toInt(), ciphertexts)
+    }
+
+    override fun confederationDkgInvestigate(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, broadcast: ByteArray, responses: ByteArray): ConfederationFault {
+        requireRpd(rpd)
+        requireConfederationRole(groupId, adminId)
+        require32(hostseckey32, "host secret key")
+        val fault = IntArray(2)
+        val result = Secp256k1CFunctions.secp256k1_confederation_dkg_investigate(Secp256k1Context.getContext(), rpd, groupId.toInt(), adminId.toInt(), hostseckey32, broadcast, responses, fault)
+        if (result != 1 && (fault[0] == ConfederationFault.INVALID_INPUT || fault[0] == ConfederationFault.NONE)) throw Secp256k1Exception("secp256k1_confederation_dkg_investigate failed")
+        return confederationFault(fault)
+    }
 }

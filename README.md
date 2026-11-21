@@ -121,9 +121,23 @@ A typical initial sequence is:
 3. Sign with a fresh signing session ID, full-role share and host-secret arrays, and canonically ordered group/admin selections. Four zero bytes encode no tweaks. Secret nonces are consumed by each attempt and must never be reused across attempts.
 4. Serialize recovery packages with `confederationRecoverySerialize`. Later, parse them with the corresponding host secret, open them against the current RPD/KSD, and validate the recovered share.
 
+#### The DKG one role at a time
+
+`confederationDkg` runs every role in one process, which is a test harness, not a ceremony. The `confederationDkg...` step functions run it the way it happens: each role on its own device, the coordinator relaying bytes between them. Every step is a deterministic function of what it is given, so a role that restarts recomputes a step from what it stored.
+
+1. Every role: `confederationDkgParticipantStep1` gives a dealer record and a ciphertext vector. Store both and send them to the coordinator, then erase the dealer seed.
+2. Coordinator: `confederationDkgCoordinatorStep1` checks every record and writes the broadcast.
+3. Every role: `confederationDkgParticipantStep2` runs every check, derives the KSD itself (it never accepts one) and signs an authorization of the genesis transition.
+4. Coordinator: `confederationDkgEvidenceListWrite` collects the authorizations.
+5. Every role: durably store the RPD, the KSD, the broadcast, its own record and its recovery nonce, then `confederationDkgParticipantAcknowledge`. The acknowledgment says the role can never lose its share.
+6. Coordinator: collect the acknowledgments, derive its own KSD with `confederationDkgDeriveKsd`, and certify the genesis with `confederationDkgCoordinatorFinalize`.
+7. Every role: `confederationDkgParticipantFinalize` checks the certified transition and recomputes its share and recovery package.
+
+A step that judges another party's message returns a `ConfederationStep.Faulted` carrying a `ConfederationFault`: a code and the flattened RPD index of the implicated role, or null. A fault is an answer, not an error. `Secp256k1Exception` is kept for this caller's own malformed input. `ROLE_OR_COORDINATOR` from step 3 means the role's share did not decrypt; `confederationDkgInvestigationResponse` and `confederationDkgInvestigate` decide whether the dealer or the coordinator is at fault. `ConfederationDistributedDkgTest` runs the whole ceremony against upstream's vectors.
+
 The library is stateless. Transport, sender authentication, real-world entity attestation, authorization, durable attempt and abandonment records, timeout handling, consensus, and atomic state transitions remain application responsibilities. Unique host keys do not establish independent people or entities. RecoveryPackage encryption is a non-standard candidate; compromising a host key exposes that role's shares in every epoch where the key was registered.
 
-The bindings cleanse native scratch copies where practical, but cannot wipe caller-provided Kotlin arrays or returned secret objects. Upstream's enrollment, refresh, masking, and resharing round steps are internal at the pinned revision and are not exposed as public lifecycle orchestration here. `ConfederationTest` and `ConfederationVectorsTest` demonstrate the supported call sequences.
+The bindings cleanse native scratch copies where practical, but cannot wipe caller-provided Kotlin arrays or returned secret objects. Upstream's enrollment, refresh, masking, and resharing round steps are internal at the pinned revision and are not exposed as public lifecycle orchestration here. `ConfederationTest`, `ConfederationVectorsTest` and `ConfederationDistributedDkgTest` demonstrate the supported call sequences.
 
 ### FROST share refresh
 

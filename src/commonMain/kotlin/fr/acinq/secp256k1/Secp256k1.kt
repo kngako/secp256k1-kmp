@@ -1271,6 +1271,62 @@ public interface Secp256k1 {
     /** Return the confederation supergroup key as a 32-byte even-Y x-only public key. */
     public fun confederationKsdPubkeyGet(ksd: ByteArray, rpd: ByteArray): ByteArray
 
+    /*
+     * The initial DKG one role at a time (zkp doc/confederation-implementation-plan.md section 3.8). Every step is a
+     * deterministic function of its explicit inputs, so a role that restarts recomputes a step from what it stored and
+     * gets the same bytes. Steps that judge another party's message return a [ConfederationStep.Faulted] instead of
+     * throwing; [Secp256k1Exception] is reserved for this caller's own malformed input. The flow, with the coordinator
+     * relaying everything:
+     *
+     *  1. every role:  [confederationDkgParticipantStep1]  -> record, ciphertexts (store both, then erase the dealer seed)
+     *  2. coordinator: [confederationDkgCoordinatorStep1]  -> broadcast
+     *  3. every role:  [confederationDkgParticipantStep2]  -> KSD, transition hash, authorization
+     *  4. coordinator: [confederationDkgEvidenceListWrite] -> authorization list
+     *  5. every role:  durably store the RPD, KSD, broadcast, own record and recovery nonce, then
+     *                  [confederationDkgParticipantAcknowledge] -> acknowledgment
+     *  6. coordinator: [confederationDkgEvidenceListWrite], [confederationDkgDeriveKsd], [confederationDkgCoordinatorFinalize]
+     *  7. every role:  [confederationDkgParticipantFinalize] -> share, recovery package
+     */
+
+    /** The lengths of the DKG messages for [rpd]. */
+    public fun confederationDkgMessageSizes(rpd: ByteArray): ConfederationDkgMessageSizes
+
+    /** Step 1, every role: the signed dealer record and the ciphertext vector. [dealerSeed32] is a fresh single-use secret. */
+    public fun confederationDkgParticipantStep1(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, dealerSeed32: ByteArray, sessionSeed32: ByteArray): ConfederationDkgDealing
+
+    /** Step 2, coordinator: verify every role's record and ciphertexts, each concatenated in RPD role order, and write the broadcast. */
+    public fun confederationDkgCoordinatorStep1(rpd: ByteArray, sessionSeed32: ByteArray, records: ByteArray, ciphertexts: ByteArray): ConfederationStep<ByteArray>
+
+    /** Derive the KSD from a broadcast. Every role does this inside step 3; the coordinator calls it before finalizing. */
+    public fun confederationDkgDeriveKsd(rpd: ByteArray, broadcast: ByteArray): ByteArray
+
+    /** The unsigned genesis transition for [rpd] and [ksd], and its hash. */
+    public fun confederationDkgGenesisPrepare(rpd: ByteArray, ksd: ByteArray): ConfederationDkgGenesis
+
+    /** Step 3, every role: every check of protocol section 7.4, the role's own KSD, and its authorization. */
+    public fun confederationDkgParticipantStep2(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, sessionSeed32: ByteArray, ownRecord: ByteArray, broadcast: ByteArray): ConfederationStep<ConfederationDkgAuthorization>
+
+    /** An authorization or acknowledgment list: one 64-byte signature per role, in RPD role order. */
+    public fun confederationDkgEvidenceListWrite(rpd: ByteArray, signatures64: Array<ByteArray>): ByteArray
+
+    /** Verify every role's evidence over [transitionHash32]; null when every signature verifies. [purpose] is [CONFEDERATION_EVIDENCE_AUTHORIZE] or [CONFEDERATION_EVIDENCE_ACKNOWLEDGE]. */
+    public fun confederationDkgVerifyEvidence(rpd: ByteArray, transitionHash32: ByteArray, purpose: Int, evidenceList: ByteArray): ConfederationFault?
+
+    /** Step 5, every role: verify every authorization, then acknowledge. Call only after durably storing what protocol section 7.6 step 3 lists. */
+    public fun confederationDkgParticipantAcknowledge(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, transitionHash32: ByteArray, authorizations: ByteArray): ConfederationStep<ByteArray>
+
+    /** Step 6, coordinator: the certified genesis transition from both lists, over the coordinator's own [ksd]. */
+    public fun confederationDkgCoordinatorFinalize(rpd: ByteArray, ksd: ByteArray, authorizations: ByteArray, acknowledgments: ByteArray): ConfederationStep<ByteArray>
+
+    /** Step 7, every role: validate the certified [transition], recompute the share and issue its recovery package with a fresh [recoveryNonce32]. */
+    public fun confederationDkgParticipantFinalize(transition: ByteArray, rpd: ByteArray, ksd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, ownRecord: ByteArray, broadcast: ByteArray, recoveryNonce32: ByteArray): ConfederationDkgShare
+
+    /** Protocol section 7.5, coordinator: one dealer's investigation response, from the ciphertext vector it received from that dealer. */
+    public fun confederationDkgInvestigationResponse(rpd: ByteArray, sessionSeed32: ByteArray, dealerGroupId: UInt, dealerAdminId: UInt, ciphertexts: ByteArray): ByteArray
+
+    /** Protocol section 7.5, a recipient: judge every dealer's response, concatenated in RPD role order. */
+    public fun confederationDkgInvestigate(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, broadcast: ByteArray, responses: ByteArray): ConfederationFault
+
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
         public fun get(): Secp256k1 = this
@@ -1288,6 +1344,9 @@ public interface Secp256k1 {
         public const val FROST_MAX_PARTICIPANTS: Int = 128
 
         public const val CHILLDKG_MAX_PARTICIPANTS: Int = 128
+
+        public const val CONFEDERATION_EVIDENCE_AUTHORIZE: Int = 0
+        public const val CONFEDERATION_EVIDENCE_ACKNOWLEDGE: Int = 1
         public const val CHILLDKG_PARTICIPANT_STATE1_SIZE: Int = 4306
         public const val CHILLDKG_PARTICIPANT_STATE2_SIZE: Int = 21073
         public const val CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE: Int = 4205
@@ -1477,6 +1536,50 @@ public data class ConfederationDkgResult(
     val recoveries: Array<ByteArray>,
 ) {
     public val roleCount: Int get() = shares.size
+}
+
+/**
+ * A fault one confederation step attributes to another party. [roleIndex] is the flattened RPD index of the
+ * implicated role, or null when no single role is implicated.
+ */
+public data class ConfederationFault(val code: Int, val roleIndex: UInt?) {
+    public companion object {
+        public const val NONE: Int = 0
+        public const val INVALID_INPUT: Int = 1
+        public const val INVALID_CONFIGURATION: Int = 2
+        public const val COORDINATOR: Int = 3
+        public const val ROLE: Int = 4
+        public const val ROLE_OR_COORDINATOR: Int = 5
+        public const val UNKNOWN: Int = 6
+    }
+}
+
+/** The outcome of a confederation step that judges another party's message: its output, or the fault it found. */
+public sealed class ConfederationStep<out T> {
+    public class Done<out T>(public val value: T) : ConfederationStep<T>()
+    public class Faulted(public val fault: ConfederationFault) : ConfederationStep<Nothing>() {
+        override fun toString(): String = "Faulted($fault)"
+    }
+
+    public fun valueOrNull(): T? = (this as? Done<T>)?.value
+    public fun faultOrNull(): ConfederationFault? = (this as? Faulted)?.fault
+}
+
+/** The lengths of the DKG messages for one RPD. */
+public data class ConfederationDkgMessageSizes(val record: Int, val ciphertexts: Int, val broadcast: Int, val evidenceList: Int, val investigationResponse: Int)
+
+/** A role's step-1 output: its signed dealer record and its ciphertext vector, one encrypted evaluation per role. */
+public class ConfederationDkgDealing(public val record: ByteArray, public val ciphertexts: ByteArray)
+
+/** An unsigned genesis transition and its hash. */
+public class ConfederationDkgGenesis(public val transition: ByteArray, public val transitionHash: ByteArray)
+
+/** A role's step-3 output: the KSD it derived itself, the genesis transition hash and its authorization over it. */
+public class ConfederationDkgAuthorization(public val ksd: ByteArray, public val transitionHash: ByteArray, public val authorization: ByteArray)
+
+/** A role's DKG result: its opaque share and its opaque recovery package. Both are secret. */
+public class ConfederationDkgShare(public val share: ByteArray, public val recovery: ByteArray) {
+    override fun toString(): String = "ConfederationDkgShare(<secret>)"
 }
 
 public class Secp256k1Exception : RuntimeException {

@@ -663,6 +663,78 @@ JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1ch
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_params_serialize
+ * Signature: (J[B[[B[[BII[I[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1params_1serialize
+  (JNIEnv *, jclass, jlong, jbyteArray, jobjectArray, jobjectArray, jint, jint, jintArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_params_hash
+ * Signature: (J[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1params_1hash
+  (JNIEnv *, jclass, jlong, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_participant_step1
+ * Signature: (J[B[BI[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1step1
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jint, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_coordinator_step1
+ * Signature: (J[[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1coordinator_1step1
+  (JNIEnv *, jclass, jlong, jobjectArray, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_participant_step2
+ * Signature: (J[B[B[BI[B[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1step2
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_coordinator_finalize
+ * Signature: (J[B[B[[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1coordinator_1finalize
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jobjectArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_participant_finalize
+ * Signature: (J[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1finalize
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_participant_recover
+ * Signature: (J[B[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1recover
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_frost_refresh_public_recover
+ * Signature: (J[B[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1public_1recover
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
  * Method:    secp256k1_iceberg_shares_gen
  * Signature: (JII[B)[B
  */
@@ -983,75 +1055,107 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_params_serialize
- * Signature: (J[B[[B[[BII[I[B)[B
+ * Method:    secp256k1_confederation_dkg_message_sizes
+ * Signature: (J[B)[I
  */
-JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1params_1serialize
-  (JNIEnv *, jclass, jlong, jbyteArray, jobjectArray, jobjectArray, jint, jint, jintArray, jbyteArray);
-
-/*
- * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_params_hash
- * Signature: (J[B)[B
- */
-JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1params_1hash
+JNIEXPORT jintArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1message_1sizes
   (JNIEnv *, jclass, jlong, jbyteArray);
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_participant_step1
- * Signature: (J[B[BI[B)[B
+ * Method:    secp256k1_confederation_dkg_participant_step1
+ * Signature: (J[BII[B[B[B[B[B)I
  */
-JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1step1
-  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jint, jbyteArray);
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1step1
+  (JNIEnv *, jclass, jlong, jbyteArray, jint, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray);
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_coordinator_step1
- * Signature: (J[[B[B[B[I)I
- */
-JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1coordinator_1step1
-  (JNIEnv *, jclass, jlong, jobjectArray, jbyteArray, jbyteArray, jintArray);
-
-/*
- * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_participant_step2
- * Signature: (J[B[B[BI[B[B[B[B[B[I)I
- */
-JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1step2
-  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
-
-/*
- * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_coordinator_finalize
- * Signature: (J[B[B[[B[B[I)I
- */
-JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1coordinator_1finalize
-  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jobjectArray, jbyteArray, jintArray);
-
-/*
- * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_participant_finalize
- * Signature: (J[B[B[B[B[I)I
- */
-JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1finalize
-  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
-
-/*
- * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_participant_recover
+ * Method:    secp256k1_confederation_dkg_coordinator_step1
  * Signature: (J[B[B[B[B[B[I)I
  */
-JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1participant_1recover
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1coordinator_1step1
   (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
 
 /*
  * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
- * Method:    secp256k1_frost_refresh_public_recover
- * Signature: (J[B[B[B)I
+ * Method:    secp256k1_confederation_dkg_derive_ksd
+ * Signature: (J[B[B)[B
  */
-JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1frost_1refresh_1public_1recover
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1derive_1ksd
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_genesis_prepare
+ * Signature: (J[B[B[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1genesis_1prepare
   (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_participant_step2
+ * Signature: (J[BII[B[B[B[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1step2
+  (JNIEnv *, jclass, jlong, jbyteArray, jint, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_evidence_list_write
+ * Signature: (J[B[[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1evidence_1list_1write
+  (JNIEnv *, jclass, jlong, jbyteArray, jobjectArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_verify_evidence
+ * Signature: (J[B[BI[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1verify_1evidence
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jint, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_participant_acknowledge
+ * Signature: (J[BII[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1acknowledge
+  (JNIEnv *, jclass, jlong, jbyteArray, jint, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_coordinator_finalize
+ * Signature: (J[B[B[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1coordinator_1finalize
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jintArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_participant_finalize
+ * Signature: (J[B[B[BII[B[B[B[B[B[B)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1participant_1finalize
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jbyteArray, jint, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_investigation_response
+ * Signature: (J[B[BII[B)[B
+ */
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1investigation_1response
+  (JNIEnv *, jclass, jlong, jbyteArray, jbyteArray, jint, jint, jbyteArray);
+
+/*
+ * Class:     fr_acinq_secp256k1_Secp256k1CFunctions
+ * Method:    secp256k1_confederation_dkg_investigate
+ * Signature: (J[BII[B[B[B[I)I
+ */
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1investigate
+  (JNIEnv *, jclass, jlong, jbyteArray, jint, jint, jbyteArray, jbyteArray, jbyteArray, jintArray);
 
 #ifdef __cplusplus
 }
