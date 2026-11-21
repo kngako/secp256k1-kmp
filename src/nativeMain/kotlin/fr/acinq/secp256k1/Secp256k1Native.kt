@@ -2,6 +2,7 @@ package fr.acinq.secp256k1
 
 import kotlinx.cinterop.*
 import platform.posix.memcpy
+import platform.posix.memset
 import platform.posix.size_tVar
 import secp256k1.*
 
@@ -1864,6 +1865,135 @@ public object Secp256k1Native : Secp256k1 {
         val recovery = alloc<secp256k1_confederation_recovery>()
         secp256k1_confederation_recovery_parse(ctx, recovery.ptr, toNat(input), input.size.convert(), toNat(hostseckey32)).requireSuccess("secp256k1_confederation_recovery_parse() failed")
         recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+    }
+
+    private fun MemScope.confederationRoleCount(rpd: secp256k1_confederation_rpd): Int {
+        val encoded = serializeConfederationRpd(rpd)
+        val groups = ((encoded[60].toInt() and 0xff) shl 24) or
+            ((encoded[61].toInt() and 0xff) shl 16) or
+            ((encoded[62].toInt() and 0xff) shl 8) or
+            (encoded[63].toInt() and 0xff)
+        require(groups in 1..Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid RPD group count" }
+        var offset = 96
+        var roles = 0
+        repeat(groups) {
+            require(offset + 20 <= encoded.size) { "truncated RPD group" }
+            val groupRoles = ((encoded[offset + 16].toInt() and 0xff) shl 24) or
+                ((encoded[offset + 17].toInt() and 0xff) shl 16) or
+                ((encoded[offset + 18].toInt() and 0xff) shl 8) or
+                (encoded[offset + 19].toInt() and 0xff)
+            require(groupRoles > 0 && roles + groupRoles <= Secp256k1.CONFEDERATION_MAX_ROLES) { "invalid RPD role count" }
+            require(offset + 20 + 69 * groupRoles <= encoded.size) { "truncated RPD roles" }
+            roles += groupRoles
+            offset += 20 + 69 * groupRoles
+        }
+        require(offset == encoded.size && roles > 0) { "invalid RPD encoding" }
+        return roles
+    }
+
+    private fun requireConfederationRoleValues(values: Array<ByteArray>, name: String, valueSize: Int) {
+        require(values.isNotEmpty() && values.size <= Secp256k1.CONFEDERATION_MAX_ROLES) { "invalid $name count" }
+        values.forEach { require(it.size == valueSize) { "$name entries must be $valueSize bytes" } }
+    }
+
+    override fun confederationDkgWorkSize(rpd: ByteArray): Int = memScoped {
+        secp256k1_confederation_dkg_work_size(ctx, allocConfederationRpd(rpd, validate = false).ptr).toInt()
+    }
+
+    override fun confederationDkg(rpd: ByteArray, sessionSeed32: ByteArray, hostSeckeys32: Array<ByteArray>, dealerSeeds32: Array<ByteArray>, recoveryNonces32: Array<ByteArray>): ConfederationDkgResult = memScoped {
+        require(sessionSeed32.size == 32) { "session seed must be 32 bytes" }
+        requireConfederationRoleValues(hostSeckeys32, "host secret keys", 32)
+        requireConfederationRoleValues(dealerSeeds32, "dealer seeds", 32)
+        requireConfederationRoleValues(recoveryNonces32, "recovery nonces", 32)
+        val nRpd = allocConfederationRpd(rpd)
+        val roleCount = confederationRoleCount(nRpd)
+        if (hostSeckeys32.size != roleCount || dealerSeeds32.size != roleCount || recoveryNonces32.size != roleCount) throw Secp256k1Exception("DKG secret arrays must match the RPD role count")
+        val hostFlat = flatBytes(hostSeckeys32, 32, "host secret key")
+        val dealerFlat = flatBytes(dealerSeeds32, 32, "dealer seed")
+        val nonceFlat = flatBytes(recoveryNonces32, 32, "recovery nonce")
+        val nKsd = alloc<secp256k1_confederation_ksd>()
+        val nTransition = alloc<secp256k1_confederation_transition>()
+        val nShares = allocArray<secp256k1_confederation_share>(roleCount)
+        val nRecoveries = allocArray<secp256k1_confederation_recovery>(roleCount)
+        val workSize = secp256k1_confederation_dkg_work_size(ctx, nRpd.ptr).toInt()
+        require(workSize > 0) { "invalid DKG work size" }
+        val work = allocArray<UByteVar>(workSize)
+        val workLen = alloc<size_tVar>()
+        workLen.value = workSize.convert()
+        try {
+            secp256k1_confederation_dkg(ctx, nKsd.ptr, nTransition.ptr, nRpd.ptr, toNat(sessionSeed32), toNat(hostFlat), toNat(dealerFlat), toNat(nonceFlat), nShares, nRecoveries, work, workLen.ptr)
+                .requireSuccess("secp256k1_confederation_dkg() failed")
+            ConfederationDkgResult(
+                nKsd.ptr.readBytes(Secp256k1.CONFEDERATION_KSD_SIZE),
+                nTransition.ptr.readBytes(Secp256k1.CONFEDERATION_TRANSITION_SIZE),
+                Array(roleCount) { nShares[it].ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE) },
+                Array(roleCount) { nRecoveries[it].ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE) },
+            )
+        } finally {
+            hostFlat.fill(0)
+            dealerFlat.fill(0)
+            nonceFlat.fill(0)
+            memset(nShares, 0, (roleCount * Secp256k1.CONFEDERATION_SHARE_SIZE).convert())
+            memset(nRecoveries, 0, (roleCount * Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE).convert())
+            memset(work, 0, workSize.convert())
+        }
+    }
+
+    override fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray): ByteArray = memScoped {
+        requireConfederationRoleValues(shares, "shares", Secp256k1.CONFEDERATION_SHARE_SIZE)
+        requireConfederationRoleValues(hostSeckeys32, "host secret keys", 32)
+        require(signingSessionId32.size == 32) { "signing session id must be 32 bytes" }
+        require(groupIds.isNotEmpty() && groupIds.size <= Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid outer group count" }
+        require(groupIds.all { it < Secp256k1.CONFEDERATION_MAX_GROUPS.toUInt() }) { "invalid group id" }
+        require(innerCounts.size == groupIds.size) { "inner counts must match outer groups" }
+        require(innerCounts.all { it in 1..Secp256k1.CONFEDERATION_MAX_ROLES }) { "invalid inner signer count" }
+        require(adminIds.size == innerCounts.sum()) { "admin ids must match inner signer counts" }
+        require(adminIds.size <= Secp256k1.CONFEDERATION_MAX_ROLES) { "too many signers" }
+        require(adminIds.all { it < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt() }) { "invalid admin id" }
+        require(tweakSequence.size in 4..Secp256k1.CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE) { "invalid tweak sequence size" }
+        require(message32.size == 32) { "message must be 32 bytes" }
+        val state = allocConfederationState(rpd, ksd)
+        val roleCount = confederationRoleCount(state.rpd)
+        if (shares.size != roleCount || hostSeckeys32.size != roleCount) throw Secp256k1Exception("shares and host secret keys must match the RPD role count")
+        val hostFlat = flatBytes(hostSeckeys32, 32, "host secret key")
+        val nShares = allocArray<secp256k1_confederation_share>(roleCount)
+        try {
+            shares.forEachIndexed { index, share ->
+                memcpy(nShares[index].ptr, toNat(share), Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+                secp256k1_confederation_share_validate(ctx, nShares[index].ptr, state.ksd.ptr, state.rpd.ptr).requireSuccess("invalid opaque share for descriptors")
+            }
+            val signature = ByteArray(64)
+            secp256k1_confederation_sign(
+                ctx,
+                toNat(signature),
+                state.rpd.ptr,
+                state.ksd.ptr,
+                nShares,
+                toNat(hostFlat),
+                toNat(signingSessionId32),
+                groupIds.toCValues(),
+                groupIds.size.toUInt(),
+                innerCounts.map { it.toUInt() }.toUIntArray().toCValues(),
+                adminIds.toCValues(),
+                adminIds.size.toUInt(),
+                toNat(tweakSequence),
+                tweakSequence.size.convert(),
+                toNat(message32),
+            ).requireSuccess("secp256k1_confederation_sign() failed")
+            signature
+        } finally {
+            hostFlat.fill(0)
+            memset(nShares, 0, (roleCount * Secp256k1.CONFEDERATION_SHARE_SIZE).convert())
+        }
+    }
+
+    override fun confederationKsdPubkeyGet(ksd: ByteArray, rpd: ByteArray): ByteArray = memScoped {
+        val state = allocConfederationState(rpd, ksd)
+        val pubkey = alloc<secp256k1_xonly_pubkey>()
+        secp256k1_confederation_ksd_pubkey_get(ctx, pubkey.ptr, state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_ksd_pubkey_get() failed")
+        val out = ByteArray(32)
+        secp256k1_xonly_pubkey_serialize(ctx, toNat(out), pubkey.ptr).requireSuccess("secp256k1_xonly_pubkey_serialize() failed")
+        out
     }
 }
 

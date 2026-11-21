@@ -4173,3 +4173,296 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     CHECKRESULT(!result, "secp256k1_confederation_recovery_parse failed");
     return copy_bytes_to_java(penv, recovery.data, sizeof(recovery.data));
 }
+
+
+#define CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE 2116
+
+static void jni_confederation_clear(void* ptr, size_t len)
+{
+    volatile unsigned char* p = (volatile unsigned char*)ptr;
+    size_t i;
+    if (p != NULL) {
+        for (i = 0; i < len; i++) p[i] = 0;
+    }
+}
+
+static uint32_t confederation_read_u32(const unsigned char* p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static int confederation_role_count(const secp256k1_context* ctx, const secp256k1_confederation_rpd* rpd, size_t* role_count)
+{
+    unsigned char* encoded = NULL;
+    size_t len = secp256k1_confederation_rpd_serialized_size(ctx, rpd);
+    size_t offset = 96, roles = 0, i;
+    uint32_t groups;
+    int ok = 0;
+    if (len < 96 || len > CONFEDERATION_RPD_MAX_SERIALIZED_SIZE) return 0;
+    encoded = malloc(len);
+    if (encoded == NULL || !secp256k1_confederation_rpd_serialize(ctx, encoded, &len, rpd)) goto cleanup;
+    groups = confederation_read_u32(encoded + 60);
+    if (groups == 0 || groups > SECP256K1_CONFEDERATION_MAX_GROUPS) goto cleanup;
+    for (i = 0; i < groups; i++) {
+        uint32_t roles_in_group;
+        if ((size_t)(len - offset) < 20) goto cleanup;
+        roles_in_group = confederation_read_u32(encoded + offset + 16);
+        if (roles_in_group == 0 || roles_in_group > SECP256K1_CONFEDERATION_MAX_ROLES
+                || roles > SECP256K1_CONFEDERATION_MAX_ROLES - roles_in_group
+                || (size_t)roles_in_group > (len - offset - 20) / 69) goto cleanup;
+        roles += roles_in_group;
+        offset += 20 + 69 * (size_t)roles_in_group;
+    }
+    if (offset != len || roles == 0) goto cleanup;
+    *role_count = roles;
+    ok = 1;
+cleanup:
+    free(encoded);
+    return ok;
+}
+
+static unsigned char* get_confederation_flat32(JNIEnv* penv, jobjectArray jvalues, size_t* count, const char* name)
+{
+    unsigned char* flat;
+    jbyteArray jvalue;
+    jsize i, n;
+    n = (*penv)->GetArrayLength(penv, jvalues);
+    if (n < 1 || n > SECP256K1_CONFEDERATION_MAX_ROLES) {
+        JNI_ThrowSecp256k1(penv, "invalid confederation role value count");
+        return NULL;
+    }
+    flat = malloc(32 * (size_t)n);
+    if (flat == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        jvalue = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jvalues, i);
+        if (!get_bytes(penv, jvalue, 32, flat + 32 * (size_t)i, name)) {
+            (*penv)->DeleteLocalRef(penv, jvalue);
+            jni_confederation_clear(flat, 32 * (size_t)n);
+            free(flat);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jvalue);
+    }
+    *count = (size_t)n;
+    return flat;
+}
+
+static secp256k1_confederation_share* get_confederation_shares(JNIEnv* penv, const secp256k1_context* ctx, jobjectArray jshares, size_t roles, const secp256k1_confederation_ksd* ksd, const secp256k1_confederation_rpd* rpd)
+{
+    secp256k1_confederation_share* shares;
+    jbyteArray jshare;
+    size_t i;
+    if ((size_t)(*penv)->GetArrayLength(penv, jshares) != roles) {
+        JNI_ThrowSecp256k1(penv, "shares count must match the RPD role count");
+        return NULL;
+    }
+    shares = calloc(roles, sizeof(*shares));
+    if (shares == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    for (i = 0; i < roles; i++) {
+        jshare = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jshares, (jsize)i);
+        if (!get_bytes(penv, jshare, sizeof(shares[i].data), shares[i].data, "opaque share")
+                || !secp256k1_confederation_share_validate(ctx, &shares[i], ksd, rpd)) {
+            if (!(*penv)->ExceptionCheck(penv)) JNI_ThrowSecp256k1(penv, "invalid opaque share for descriptors");
+            (*penv)->DeleteLocalRef(penv, jshare);
+            jni_confederation_clear(shares, roles * sizeof(*shares));
+            free(shares);
+            return NULL;
+        }
+        (*penv)->DeleteLocalRef(penv, jshare);
+    }
+    return shares;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg_1work_1size(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    size_t work_size;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jrpd, sizeof(rpd.data), rpd.data, "opaque RPD")) return 0;
+    work_size = secp256k1_confederation_dkg_work_size(ctx, &rpd);
+    CHECKRESULT(work_size > 0x7fffffff, "DKG work size is too large");
+    return (jint)work_size;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1dkg(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jsessionseed, jobjectArray jhostseckeys, jobjectArray jdealerseeds, jobjectArray jrecoverynonces)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_transition transition;
+    secp256k1_confederation_share* shares = NULL;
+    secp256k1_confederation_recovery* recoveries = NULL;
+    unsigned char session_seed[32];
+    unsigned char* hostseckeys = NULL;
+    unsigned char* dealer_seeds = NULL;
+    unsigned char* recovery_nonces = NULL;
+    unsigned char* work = NULL;
+    unsigned char* out = NULL;
+    jbyteArray jout = NULL;
+    size_t roles = 0, host_count = 0, dealer_count = 0, nonce_count = 0, worklen = 0, outlen, offset;
+    int ok = 0;
+    const char* error = "secp256k1_confederation_dkg failed";
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_bytes32(penv, jsessionseed, session_seed, "session seed")) return NULL;
+    if (!confederation_role_count(ctx, &rpd, &roles)) {
+        JNI_ThrowSecp256k1(penv, "could not determine RPD role count");
+        return NULL;
+    }
+    hostseckeys = get_confederation_flat32(penv, jhostseckeys, &host_count, "host secret key");
+    dealer_seeds = get_confederation_flat32(penv, jdealerseeds, &dealer_count, "dealer seed");
+    recovery_nonces = get_confederation_flat32(penv, jrecoverynonces, &nonce_count, "recovery nonce");
+    if (hostseckeys == NULL || dealer_seeds == NULL || recovery_nonces == NULL) goto cleanup;
+    if (host_count != roles || dealer_count != roles || nonce_count != roles) {
+        error = "DKG secret arrays must match the RPD role count";
+        goto cleanup;
+    }
+    worklen = secp256k1_confederation_dkg_work_size(ctx, &rpd);
+    if (worklen == 0) goto cleanup;
+    work = malloc(worklen);
+    shares = calloc(roles, sizeof(*shares));
+    recoveries = calloc(roles, sizeof(*recoveries));
+    if (work == NULL || shares == NULL || recoveries == NULL) {
+        error = "memory allocation failed";
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_dkg(ctx, &ksd, &transition, &rpd, session_seed, hostseckeys, dealer_seeds, recovery_nonces, shares, recoveries, work, &worklen)) goto cleanup;
+    if (roles > (0x7fffffff - 2 * 65536) / (sizeof(*shares) + sizeof(*recoveries))) {
+        error = "DKG result is too large";
+        goto cleanup;
+    }
+    outlen = 2 * 65536 + roles * (sizeof(*shares) + sizeof(*recoveries));
+    out = malloc(outlen);
+    if (out == NULL) {
+        error = "memory allocation failed";
+        goto cleanup;
+    }
+    memcpy(out, ksd.data, sizeof(ksd.data));
+    memcpy(out + sizeof(ksd.data), transition.data, sizeof(transition.data));
+    offset = sizeof(ksd.data) + sizeof(transition.data);
+    memcpy(out + offset, shares, roles * sizeof(*shares));
+    offset += roles * sizeof(*shares);
+    memcpy(out + offset, recoveries, roles * sizeof(*recoveries));
+    jout = copy_bytes_to_java(penv, out, outlen);
+    if (jout == NULL) goto cleanup;
+    ok = 1;
+cleanup:
+    if (hostseckeys != NULL) jni_confederation_clear(hostseckeys, 32 * host_count);
+    if (dealer_seeds != NULL) jni_confederation_clear(dealer_seeds, 32 * dealer_count);
+    if (recovery_nonces != NULL) jni_confederation_clear(recovery_nonces, 32 * nonce_count);
+    if (shares != NULL) jni_confederation_clear(shares, roles * sizeof(*shares));
+    if (recoveries != NULL) jni_confederation_clear(recoveries, roles * sizeof(*recoveries));
+    if (work != NULL) jni_confederation_clear(work, worklen);
+    if (out != NULL) jni_confederation_clear(out, outlen);
+    jni_confederation_clear(session_seed, sizeof(session_seed));
+    free(hostseckeys);
+    free(dealer_seeds);
+    free(recovery_nonces);
+    free(shares);
+    free(recoveries);
+    free(work);
+    free(out);
+    if (!ok && !(*penv)->ExceptionCheck(penv)) JNI_ThrowSecp256k1(penv, error);
+    return ok ? jout : NULL;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jksd, jobjectArray jshares, jobjectArray jhostseckeys, jbyteArray jsessionid, jintArray jgroupids, jintArray jinnercounts, jintArray jadminids, jbyteArray jtweaksequence, jbyteArray jmessage)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_confederation_share* shares = NULL;
+    unsigned char signature[64], session_id[32], message[32];
+    unsigned char* hostseckeys = NULL;
+    unsigned char* tweak_sequence = NULL;
+    uint32_t* group_ids = NULL;
+    uint32_t* inner_counts = NULL;
+    uint32_t* admin_ids = NULL;
+    size_t roles = 0, host_count = 0, outer_count = 0, inner_count = 0, signer_count = 0, tweak_len = 0, sum = 0, i;
+    jbyteArray out = NULL;
+    int ok = 0;
+    const char* error = "secp256k1_confederation_sign failed";
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &ksd, &rpd)) return NULL;
+    if (!confederation_role_count(ctx, &rpd, &roles)) {
+        JNI_ThrowSecp256k1(penv, "could not determine RPD role count");
+        return NULL;
+    }
+    signer_count = (size_t)(*penv)->GetArrayLength(penv, jadminids);
+    if ((size_t)(*penv)->GetArrayLength(penv, jgroupids) != (size_t)(*penv)->GetArrayLength(penv, jinnercounts)) {
+        JNI_ThrowSecp256k1(penv, "inner counts must match outer groups");
+        return NULL;
+    }
+    group_ids = get_signer_ids(penv, jgroupids, &outer_count);
+    inner_counts = get_signer_ids(penv, jinnercounts, &inner_count);
+    admin_ids = get_signer_ids(penv, jadminids, &signer_count);
+    if (group_ids == NULL || inner_counts == NULL || admin_ids == NULL) goto cleanup;
+    if (outer_count == 0 || outer_count > SECP256K1_CONFEDERATION_MAX_GROUPS || inner_count != outer_count
+            || signer_count == 0 || signer_count > SECP256K1_CONFEDERATION_MAX_ROLES) goto cleanup;
+    for (i = 0; i < outer_count; i++) {
+        if (group_ids[i] >= SECP256K1_CONFEDERATION_MAX_GROUPS || inner_counts[i] == 0
+                || inner_counts[i] > SECP256K1_CONFEDERATION_MAX_ROLES || sum > SECP256K1_CONFEDERATION_MAX_ROLES - inner_counts[i]) goto cleanup;
+        sum += inner_counts[i];
+    }
+    if (sum != signer_count) {
+        error = "admin ids must match inner signer counts";
+        goto cleanup;
+    }
+    for (i = 0; i < signer_count; i++) {
+        if (admin_ids[i] >= SECP256K1_CONFEDERATION_MAX_ROLES) goto cleanup;
+    }
+    shares = get_confederation_shares(penv, ctx, jshares, roles, &ksd, &rpd);
+    hostseckeys = get_confederation_flat32(penv, jhostseckeys, &host_count, "host secret key");
+    if (shares == NULL || hostseckeys == NULL || host_count != roles) {
+        if (hostseckeys != NULL && host_count != roles && !(*penv)->ExceptionCheck(penv)) JNI_ThrowSecp256k1(penv, "host secret keys must match the RPD role count");
+        goto cleanup;
+    }
+    if (!get_bytes32(penv, jsessionid, session_id, "signing session id")) goto cleanup;
+    if (!get_bytes32(penv, jmessage, message, "message")) goto cleanup;
+    if (!get_confederation_input(penv, jtweaksequence, CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE, &tweak_sequence, &tweak_len, "tweak sequence")) goto cleanup;
+    if (tweak_len < 4) {
+        error = "invalid tweak sequence size";
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_sign(ctx, signature, &rpd, &ksd, shares, hostseckeys, session_id, group_ids, (uint32_t)outer_count, inner_counts, admin_ids, (uint32_t)signer_count, tweak_sequence, tweak_len, message)) goto cleanup;
+    out = copy_bytes_to_java(penv, signature, sizeof(signature));
+    if (out == NULL) goto cleanup;
+    ok = 1;
+cleanup:
+    if (shares != NULL) jni_confederation_clear(shares, roles * sizeof(*shares));
+    if (hostseckeys != NULL) jni_confederation_clear(hostseckeys, 32 * host_count);
+    free(shares);
+    free(hostseckeys);
+    free(group_ids);
+    free(inner_counts);
+    free(admin_ids);
+    free(tweak_sequence);
+    if (!ok && !(*penv)->ExceptionCheck(penv)) JNI_ThrowSecp256k1(penv, error);
+    return ok ? out : NULL;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1ksd_1pubkey_1get(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jksd, jbyteArray jrpd)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    secp256k1_xonly_pubkey pubkey;
+    unsigned char out32[32];
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &rpd)) return NULL;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &ksd, &rpd)) return NULL;
+    result = secp256k1_confederation_ksd_pubkey_get(ctx, &pubkey, &ksd, &rpd);
+    CHECKRESULT(!result, "secp256k1_confederation_ksd_pubkey_get failed");
+    result = secp256k1_xonly_pubkey_serialize(ctx, out32, &pubkey);
+    CHECKRESULT(!result, "secp256k1_xonly_pubkey_serialize failed");
+    return copy_bytes_to_java(penv, out32, sizeof(out32));
+}

@@ -367,4 +367,13 @@ public class Secp256k1CFunctions {
     public static native int secp256k1_confederation_recovery_serialized_size(long ctx, byte[] recovery);
 
     public static native byte[] secp256k1_confederation_recovery_parse(long ctx, byte[] input, byte[] hostseckey32);
+
+    public static native int secp256k1_confederation_dkg_work_size(long ctx, byte[] rpd);
+
+    /* Returns opaque KSD || transition || role-count shares || role-count recoveries. */
+    public static native byte[] secp256k1_confederation_dkg(long ctx, byte[] rpd, byte[] session_seed32, byte[][] hostseckeys32, byte[][] dealer_seeds32, byte[][] recovery_nonces32);
+
+    public static native byte[] secp256k1_confederation_sign(long ctx, byte[] rpd, byte[] ksd, byte[][] shares, byte[][] hostseckeys32, byte[] signing_session_id32, int[] group_ids, int[] inner_counts, int[] admin_ids, byte[] tweak_sequence, byte[] message32);
+
+    public static native byte[] secp256k1_confederation_ksd_pubkey_get(long ctx, byte[] ksd, byte[] rpd);
 }

@@ -1194,6 +1194,28 @@ public interface Secp256k1 {
     /** Parse and authenticate a 269-byte RecoveryPackage. */
     public fun confederationRecoveryParse(input: ByteArray, hostseckey32: ByteArray): ByteArray
 
+    /** Return the native scratch bytes required by [confederationDkg], or 0 for an invalid RPD. */
+    public fun confederationDkgWorkSize(rpd: ByteArray): Int
+
+    /**
+     * Run the initial nested DKG for every role in one process. Each input array contains one 32-byte value per
+     * flattened RPD role and must be freshly generated as required by the protocol. This is an unreviewed
+     * experimental convenience call, not a distributed protocol driver: transport, durable attempt records,
+     * consensus, authorization, and atomic persistence remain application responsibilities.
+     */
+    public fun confederationDkg(rpd: ByteArray, sessionSeed32: ByteArray, hostSeckeys32: Array<ByteArray>, dealerSeeds32: Array<ByteArray>, recoveryNonces32: Array<ByteArray>): ConfederationDkgResult
+
+    /**
+     * Run one complete Option A nested signing attempt and return a 64-byte BIP340 signature. [shares] and
+     * [hostSeckeys32] contain one entry per flattened RPD role. [groupIds] and [innerCounts] select outer groups;
+     * [adminIds] is their flattened, canonically ordered signer selection. Use a fresh signing session id for every
+     * attempt. Four zero bytes encode an empty tweak sequence.
+     */
+    public fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray): ByteArray
+
+    /** Return the confederation supergroup key as a 32-byte even-Y x-only public key. */
+    public fun confederationKsdPubkeyGet(ksd: ByteArray, rpd: ByteArray): ByteArray
+
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
         public fun get(): Secp256k1 = this
@@ -1237,6 +1259,7 @@ public interface Secp256k1 {
         public const val CONFEDERATION_RPD_MAX_SERIALIZED_SIZE: Int = 10208
         public const val CONFEDERATION_KSD_MAX_SERIALIZED_SIZE: Int = 10929
         public const val CONFEDERATION_TRANSITION_MAX_SERIALIZED_SIZE: Int = 62408
+        public const val CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE: Int = 2116
         public val CONFEDERATION_NO_SPECIFIC_ROLE: UInt = UInt.MAX_VALUE
         /*
          * libsecp256k1 tags each of its opaque musig2 objects with a 4-byte magic prefix and validates it
@@ -1335,6 +1358,16 @@ public data class FrostEnrollmentShareAggResult(val sigma: ByteArray?, val misma
 
 /** Exact minimum signing and blocking coalition sizes for a confederation roster. */
 public data class ConfederationAccess(val minSigners: Int, val minBlockers: Int)
+
+/** Outputs of [Secp256k1.confederationDkg]. Every field contains build-specific opaque native objects. */
+public data class ConfederationDkgResult(
+    val ksd: ByteArray,
+    val transition: ByteArray,
+    val shares: Array<ByteArray>,
+    val recoveries: Array<ByteArray>,
+) {
+    public val roleCount: Int get() = shares.size
+}
 
 public class Secp256k1Exception : RuntimeException {
     public constructor() : super()
