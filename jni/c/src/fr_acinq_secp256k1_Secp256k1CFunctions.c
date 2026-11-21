@@ -19,6 +19,8 @@
 #include "include/secp256k1_recovery.h"
 #include "include/secp256k1_schnorrsig.h"
 
+static void jni_confederation_clear(void* ptr, size_t len);
+
 /*
  * libsecp256k1 tags each of its opaque musig2 objects with a 4-byte magic prefix and validates it
  * internally with ARG_CHECK, which invokes the context's illegal-argument callback. The default
@@ -4058,14 +4060,18 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     secp256k1_confederation_share share;
     unsigned char secshare[32];
     int present, result;
+    jbyteArray out;
     CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
     CHECKRESULT(jgroupid < 0 || jgroupid >= SECP256K1_CONFEDERATION_MAX_GROUPS, "invalid group id");
     CHECKRESULT(jadminid < 0 || jadminid >= SECP256K1_CONFEDERATION_MAX_ROLES, "invalid admin id");
     if (!get_confederation_state(penv, ctx, jrpd, jksd, &rpd, &ksd, 1, &present)) return NULL;
     if (!get_bytes32(penv, jsecshare, secshare, "secret share")) return NULL;
     result = secp256k1_confederation_share_wrap(ctx, &share, (uint32_t)jgroupid, (uint32_t)jadminid, secshare, &ksd, &rpd);
-    CHECKRESULT(!result, "secp256k1_confederation_share_wrap failed");
-    return copy_bytes_to_java(penv, share.data, sizeof(share.data));
+    CHECKRESULT1(!result, "secp256k1_confederation_share_wrap failed", jni_confederation_clear(secshare, sizeof(secshare)); jni_confederation_clear(share.data, sizeof(share.data)));
+    out = copy_bytes_to_java(penv, share.data, sizeof(share.data));
+    jni_confederation_clear(secshare, sizeof(secshare));
+    jni_confederation_clear(share.data, sizeof(share.data));
+    return out;
 }
 
 JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1share_1rebind(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jhostseckey, jbyteArray jcurrentksd, jbyteArray jcurrentrpd)
@@ -4076,13 +4082,17 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     secp256k1_confederation_share share;
     unsigned char hostseckey[32];
     int present, result;
+    jbyteArray out;
     CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
     if (!get_confederation_state(penv, ctx, jcurrentrpd, jcurrentksd, &rpd, &ksd, 1, &present)) return NULL;
     if (!get_bytes(penv, jshare, sizeof(share.data), share.data, "opaque share")) return NULL;
     if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
     result = secp256k1_confederation_share_rebind(ctx, &share, hostseckey, &ksd, &rpd);
-    CHECKRESULT(!result, "secp256k1_confederation_share_rebind failed");
-    return copy_bytes_to_java(penv, share.data, sizeof(share.data));
+    CHECKRESULT1(!result, "secp256k1_confederation_share_rebind failed", jni_confederation_clear(hostseckey, sizeof(hostseckey)); jni_confederation_clear(share.data, sizeof(share.data)));
+    out = copy_bytes_to_java(penv, share.data, sizeof(share.data));
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    jni_confederation_clear(share.data, sizeof(share.data));
+    return out;
 }
 
 JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1share_1validate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jshare, jbyteArray jcurrentksd, jbyteArray jcurrentrpd)
@@ -4107,6 +4117,7 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     secp256k1_confederation_recovery recovery;
     unsigned char hostseckey[32], transition_hash[32], recovery_nonce[32];
     int present, result;
+    jbyteArray out;
     CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
     CHECKRESULT(joperation < 0 || joperation > 7, "invalid recovery operation");
     if (!get_confederation_state(penv, ctx, jrpd, jksd, &rpd, &ksd, 1, &present)) return NULL;
@@ -4115,8 +4126,13 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     if (!get_bytes32(penv, jtransitionhash, transition_hash, "transition hash")) return NULL;
     if (!get_bytes32(penv, jrecoverynonce, recovery_nonce, "recovery nonce")) return NULL;
     result = secp256k1_confederation_recovery_issue(ctx, &recovery, &share, hostseckey, &ksd, &rpd, (uint32_t)joperation, transition_hash, recovery_nonce);
-    CHECKRESULT(!result, "secp256k1_confederation_recovery_issue failed");
-    return copy_bytes_to_java(penv, recovery.data, sizeof(recovery.data));
+    CHECKRESULT1(!result, "secp256k1_confederation_recovery_issue failed", jni_confederation_clear(hostseckey, sizeof(hostseckey)); jni_confederation_clear(recovery_nonce, sizeof(recovery_nonce)); jni_confederation_clear(share.data, sizeof(share.data)); jni_confederation_clear(recovery.data, sizeof(recovery.data)));
+    out = copy_bytes_to_java(penv, recovery.data, sizeof(recovery.data));
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    jni_confederation_clear(recovery_nonce, sizeof(recovery_nonce));
+    jni_confederation_clear(share.data, sizeof(share.data));
+    jni_confederation_clear(recovery.data, sizeof(recovery.data));
+    return out;
 }
 
 JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1recovery_1open(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrecovery, jbyteArray jhostseckey, jbyteArray jcurrentksd, jbyteArray jcurrentrpd)
@@ -4128,13 +4144,17 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     secp256k1_confederation_share share;
     unsigned char hostseckey[32];
     int present, result;
+    jbyteArray out;
     CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
     if (!get_confederation_state(penv, ctx, jcurrentrpd, jcurrentksd, &rpd, &ksd, 1, &present)) return NULL;
     if (!get_bytes(penv, jrecovery, sizeof(recovery.data), recovery.data, "opaque recovery")) return NULL;
     if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
     result = secp256k1_confederation_recovery_open(ctx, &share, &recovery, hostseckey, &ksd, &rpd);
-    CHECKRESULT(!result, "secp256k1_confederation_recovery_open failed");
-    return copy_bytes_to_java(penv, share.data, sizeof(share.data));
+    CHECKRESULT1(!result, "secp256k1_confederation_recovery_open failed", jni_confederation_clear(hostseckey, sizeof(hostseckey)); jni_confederation_clear(share.data, sizeof(share.data)));
+    out = copy_bytes_to_java(penv, share.data, sizeof(share.data));
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    jni_confederation_clear(share.data, sizeof(share.data));
+    return out;
 }
 
 JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1recovery_1serialize(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrecovery)
@@ -4166,12 +4186,16 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
     secp256k1_confederation_recovery recovery;
     unsigned char encoded[SECP256K1_CONFEDERATION_RECOVERY_SIZE], hostseckey[32];
     int result;
+    jbyteArray out;
     CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
     if (!get_bytes(penv, jinput, sizeof(encoded), encoded, "recovery package")) return NULL;
     if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) return NULL;
     result = secp256k1_confederation_recovery_parse(ctx, &recovery, encoded, sizeof(encoded), hostseckey);
-    CHECKRESULT(!result, "secp256k1_confederation_recovery_parse failed");
-    return copy_bytes_to_java(penv, recovery.data, sizeof(recovery.data));
+    CHECKRESULT1(!result, "secp256k1_confederation_recovery_parse failed", jni_confederation_clear(hostseckey, sizeof(hostseckey)); jni_confederation_clear(recovery.data, sizeof(recovery.data)));
+    out = copy_bytes_to_java(penv, recovery.data, sizeof(recovery.data));
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    jni_confederation_clear(recovery.data, sizeof(recovery.data));
+    return out;
 }
 
 
@@ -4317,9 +4341,11 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
         return NULL;
     }
     hostseckeys = get_confederation_flat32(penv, jhostseckeys, &host_count, "host secret key");
+    if (hostseckeys == NULL) goto cleanup;
     dealer_seeds = get_confederation_flat32(penv, jdealerseeds, &dealer_count, "dealer seed");
+    if (dealer_seeds == NULL) goto cleanup;
     recovery_nonces = get_confederation_flat32(penv, jrecoverynonces, &nonce_count, "recovery nonce");
-    if (hostseckeys == NULL || dealer_seeds == NULL || recovery_nonces == NULL) goto cleanup;
+    if (recovery_nonces == NULL) goto cleanup;
     if (host_count != roles || dealer_count != roles || nonce_count != roles) {
         error = "DKG secret arrays must match the RPD role count";
         goto cleanup;
@@ -4402,9 +4428,11 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
         return NULL;
     }
     group_ids = get_signer_ids(penv, jgroupids, &outer_count);
+    if (group_ids == NULL) goto cleanup;
     inner_counts = get_signer_ids(penv, jinnercounts, &inner_count);
+    if (inner_counts == NULL) goto cleanup;
     admin_ids = get_signer_ids(penv, jadminids, &signer_count);
-    if (group_ids == NULL || inner_counts == NULL || admin_ids == NULL) goto cleanup;
+    if (admin_ids == NULL) goto cleanup;
     if (outer_count == 0 || outer_count > SECP256K1_CONFEDERATION_MAX_GROUPS || inner_count != outer_count
             || signer_count == 0 || signer_count > SECP256K1_CONFEDERATION_MAX_ROLES) goto cleanup;
     for (i = 0; i < outer_count; i++) {
@@ -4420,9 +4448,11 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
         if (admin_ids[i] >= SECP256K1_CONFEDERATION_MAX_ROLES) goto cleanup;
     }
     shares = get_confederation_shares(penv, ctx, jshares, roles, &ksd, &rpd);
+    if (shares == NULL) goto cleanup;
     hostseckeys = get_confederation_flat32(penv, jhostseckeys, &host_count, "host secret key");
-    if (shares == NULL || hostseckeys == NULL || host_count != roles) {
-        if (hostseckeys != NULL && host_count != roles && !(*penv)->ExceptionCheck(penv)) JNI_ThrowSecp256k1(penv, "host secret keys must match the RPD role count");
+    if (hostseckeys == NULL) goto cleanup;
+    if (host_count != roles) {
+        error = "host secret keys must match the RPD role count";
         goto cleanup;
     }
     if (!get_bytes32(penv, jsessionid, session_id, "signing session id")) goto cleanup;

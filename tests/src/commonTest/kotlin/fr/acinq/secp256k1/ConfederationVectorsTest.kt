@@ -82,4 +82,16 @@ class ConfederationVectorsTest {
         assertFailsWith<Secp256k1Exception> { Secp256k1.confederationKsdHash(zeroKsd, rpd) }
         assertFailsWith<Secp256k1Exception> { Secp256k1.confederationAccessAnalyze(zeroRpd) }
     }
+
+    @Test
+    fun maximumRpdSizeAndAccessLimit() {
+        val encoded = confederationMaximumRpd()
+        assertEquals(10208, encoded.size)
+        val rpd = Secp256k1.confederationRpdParse(encoded)
+        assertTrue(Secp256k1.confederationRpdValidate(rpd))
+        assertEquals(encoded.size, Secp256k1.confederationRpdSerializedSize(rpd))
+        assertContentEquals(encoded, Secp256k1.confederationRpdSerialize(rpd))
+        assertEquals(32, Secp256k1.confederationRpdHash(rpd).size)
+        assertFailsWith<Secp256k1Exception> { Secp256k1.confederationAccessAnalyze(rpd) }
+    }
 }

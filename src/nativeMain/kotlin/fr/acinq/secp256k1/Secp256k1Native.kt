@@ -1810,21 +1810,34 @@ public object Secp256k1Native : Secp256k1 {
         require(secshare32.size == 32) { "secret share must be 32 bytes" }
         val state = allocConfederationState(rpd, ksd)
         val share = alloc<secp256k1_confederation_share>()
-        secp256k1_confederation_share_wrap(ctx, share.ptr, groupId, adminId, toNat(secshare32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_share_wrap() failed")
-        share.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+        try {
+            secp256k1_confederation_share_wrap(ctx, share.ptr, groupId, adminId, toNat(secshare32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_share_wrap() failed")
+            share.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+        } finally {
+            memset(share.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+        }
     }
 
     override fun confederationShareRebind(share: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray = memScoped {
         require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
         val state = allocConfederationState(currentRpd, currentKsd)
         val nShare = allocConfederationShare(share)
-        secp256k1_confederation_share_rebind(ctx, nShare.ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_share_rebind() failed")
-        nShare.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+        try {
+            secp256k1_confederation_share_rebind(ctx, nShare.ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_share_rebind() failed")
+            nShare.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+        } finally {
+            memset(nShare.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+        }
     }
 
     override fun confederationShareValidate(share: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): Boolean = memScoped {
         val state = allocConfederationState(currentRpd, currentKsd)
-        secp256k1_confederation_share_validate(ctx, allocConfederationShare(share).ptr, state.ksd.ptr, state.rpd.ptr) == 1
+        val nShare = allocConfederationShare(share)
+        try {
+            secp256k1_confederation_share_validate(ctx, nShare.ptr, state.ksd.ptr, state.rpd.ptr) == 1
+        } finally {
+            memset(nShare.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+        }
     }
 
     override fun confederationRecoveryIssue(share: ByteArray, hostseckey32: ByteArray, ksd: ByteArray, rpd: ByteArray, operation: Int, transitionHash32: ByteArray, recoveryNonce32: ByteArray): ByteArray = memScoped {
@@ -1833,18 +1846,30 @@ public object Secp256k1Native : Secp256k1 {
         require(transitionHash32.size == 32) { "transition hash must be 32 bytes" }
         require(recoveryNonce32.size == 32) { "recovery nonce must be 32 bytes" }
         val state = allocConfederationState(rpd, ksd)
+        val nShare = allocConfederationShare(share)
         val recovery = alloc<secp256k1_confederation_recovery>()
-        secp256k1_confederation_recovery_issue(ctx, recovery.ptr, allocConfederationShare(share).ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr, operation.toUInt(), toNat(transitionHash32), toNat(recoveryNonce32))
-            .requireSuccess("secp256k1_confederation_recovery_issue() failed")
-        recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+        try {
+            secp256k1_confederation_recovery_issue(ctx, recovery.ptr, nShare.ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr, operation.toUInt(), toNat(transitionHash32), toNat(recoveryNonce32))
+                .requireSuccess("secp256k1_confederation_recovery_issue() failed")
+            recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+        } finally {
+            memset(nShare.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+            memset(recovery.ptr, 0, Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE.convert())
+        }
     }
 
     override fun confederationRecoveryOpen(recovery: ByteArray, hostseckey32: ByteArray, currentKsd: ByteArray, currentRpd: ByteArray): ByteArray = memScoped {
         require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
         val state = allocConfederationState(currentRpd, currentKsd)
+        val nRecovery = allocConfederationRecovery(recovery)
         val share = alloc<secp256k1_confederation_share>()
-        secp256k1_confederation_recovery_open(ctx, share.ptr, allocConfederationRecovery(recovery).ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_recovery_open() failed")
-        share.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+        try {
+            secp256k1_confederation_recovery_open(ctx, share.ptr, nRecovery.ptr, toNat(hostseckey32), state.ksd.ptr, state.rpd.ptr).requireSuccess("secp256k1_confederation_recovery_open() failed")
+            share.ptr.readBytes(Secp256k1.CONFEDERATION_SHARE_SIZE)
+        } finally {
+            memset(nRecovery.ptr, 0, Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE.convert())
+            memset(share.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+        }
     }
 
     override fun confederationRecoverySerialize(recovery: ByteArray): ByteArray = memScoped {
@@ -1863,8 +1888,12 @@ public object Secp256k1Native : Secp256k1 {
         require(input.size == Secp256k1.CONFEDERATION_RECOVERY_SIZE) { "recovery package must be ${Secp256k1.CONFEDERATION_RECOVERY_SIZE} bytes" }
         require(hostseckey32.size == 32) { "host secret key must be 32 bytes" }
         val recovery = alloc<secp256k1_confederation_recovery>()
-        secp256k1_confederation_recovery_parse(ctx, recovery.ptr, toNat(input), input.size.convert(), toNat(hostseckey32)).requireSuccess("secp256k1_confederation_recovery_parse() failed")
-        recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+        try {
+            secp256k1_confederation_recovery_parse(ctx, recovery.ptr, toNat(input), input.size.convert(), toNat(hostseckey32)).requireSuccess("secp256k1_confederation_recovery_parse() failed")
+            recovery.ptr.readBytes(Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE)
+        } finally {
+            memset(recovery.ptr, 0, Secp256k1.CONFEDERATION_RECOVERY_OPAQUE_SIZE.convert())
+        }
     }
 
     private fun MemScope.confederationRoleCount(rpd: secp256k1_confederation_rpd): Int {

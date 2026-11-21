@@ -105,6 +105,13 @@ jobs:
         with:
           java-version: 21
           distribution: 'temurin'
+      - name: Check native confederation
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cmake -S native/secp256k1 -B build/confederation-native -DBUILD_SHARED_LIBS=OFF -DSECP256K1_EXPERIMENTAL=ON -DSECP256K1_ENABLE_MODULE_CONFEDERATION=ON -DSECP256K1_BUILD_TESTS=ON -DSECP256K1_BUILD_EXAMPLES=ON -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF -DSECP256K1_BUILD_CTIME_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/confederation-native --parallel 2
+          ctest --test-dir build/confederation-native --output-on-failure -R confederation
       - name: Check JVM
         if: matrix.os != 'windows-latest'
         run: ./gradlew jvmTest
