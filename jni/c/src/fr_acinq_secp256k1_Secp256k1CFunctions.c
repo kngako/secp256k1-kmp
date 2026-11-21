@@ -4400,12 +4400,14 @@ cleanup:
     return ok ? jout : NULL;
 }
 
-JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jksd, jobjectArray jshares, jobjectArray jhostseckeys, jbyteArray jsessionid, jintArray jgroupids, jintArray jinnercounts, jintArray jadminids, jbyteArray jtweaksequence, jbyteArray jmessage)
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1sign(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jksd, jobjectArray jshares, jobjectArray jhostseckeys, jbyteArray jsessionid, jintArray jgroupids, jintArray jinnercounts, jintArray jadminids, jbyteArray jtweaksequence, jbyteArray jmessage, jobjectArray jsecrands)
 {
     const secp256k1_context* ctx = (const secp256k1_context*)jctx;
     secp256k1_confederation_rpd rpd;
     secp256k1_confederation_ksd ksd;
     secp256k1_confederation_share* shares = NULL;
+    unsigned char* secrands = NULL;
+    size_t secrand_count = 0;
     unsigned char signature[64], session_id[32], message[32];
     unsigned char* hostseckeys = NULL;
     unsigned char* tweak_sequence = NULL;
@@ -4463,15 +4465,32 @@ JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256
         error = "invalid tweak sequence size";
         goto cleanup;
     }
-    if (!secp256k1_confederation_sign(ctx, signature, &rpd, &ksd, shares, hostseckeys, session_id, group_ids, (uint32_t)outer_count, inner_counts, admin_ids, (uint32_t)signer_count, tweak_sequence, tweak_len, message)) goto cleanup;
+    secrands = get_confederation_flat32(penv, jsecrands, &secrand_count, "nonce secrand");
+    if (secrands == NULL) goto cleanup;
+    /* The randomness is spent whether or not signing succeeds: wipe the caller's copies now. */
+    {
+        unsigned char zero[32] = {0};
+        for (i = 0; i < secrand_count; i++) {
+            jbyteArray jsecrand = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jsecrands, (jsize)i);
+            (*penv)->SetByteArrayRegion(penv, jsecrand, 0, 32, (const jbyte*)zero);
+            (*penv)->DeleteLocalRef(penv, jsecrand);
+        }
+    }
+    if (secrand_count != signer_count) {
+        error = "nonce secrands must match the selected signers";
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_sign(ctx, signature, &rpd, &ksd, shares, hostseckeys, session_id, group_ids, (uint32_t)outer_count, inner_counts, admin_ids, (uint32_t)signer_count, tweak_sequence, tweak_len, message, secrands)) goto cleanup;
     out = copy_bytes_to_java(penv, signature, sizeof(signature));
     if (out == NULL) goto cleanup;
     ok = 1;
 cleanup:
     if (shares != NULL) jni_confederation_clear(shares, roles * sizeof(*shares));
     if (hostseckeys != NULL) jni_confederation_clear(hostseckeys, 32 * host_count);
+    if (secrands != NULL) jni_confederation_clear(secrands, 32 * secrand_count);
     free(shares);
     free(hostseckeys);
+    free(secrands);
     free(group_ids);
     free(inner_counts);
     free(admin_ids);
@@ -5318,4 +5337,531 @@ cleanup:
     free(broadcast);
     free(responses);
     return result;
+}
+
+/*
+ * Option A signing step by step (zkp implementation plan section 3.8). The session is public and
+ * crosses as its 4096 opaque bytes. The signer state holds a secret nonce: it crosses in and out
+ * as a 512-byte array, is written back after every call that changes it (confirmed, then wiped),
+ * and the native copy is cleared on every exit.
+ *
+ * Arrays of per-signer or per-group values are copied into buffers padded to the module maximum,
+ * so a short Java array makes the native call fail on a NULL or zero entry instead of reading
+ * past the end of what was given.
+ */
+
+#define CONFEDERATION_NEED_KEYS 1
+#define CONFEDERATION_NEED_TRANSCRIPT 2
+#define CONFEDERATION_NEED_MESSAGE 4
+#define CONFEDERATION_NEED_CERTIFICATE 8
+
+typedef struct {
+    secp256k1_confederation_sign_session session;
+    secp256k1_confederation_rpd rpd;
+    secp256k1_confederation_ksd ksd;
+    unsigned char* d_sign;
+    size_t d_sign_len;
+    unsigned char* transcript;
+    size_t transcript_len;
+    unsigned char message[32];
+    unsigned char* certificate;
+    size_t certificate_len;
+} jni_confederation_round;
+
+static void jni_confederation_round_free(jni_confederation_round* round)
+{
+    if (round == NULL) return;
+    free(round->d_sign);
+    free(round->transcript);
+    free(round->certificate);
+    free(round);
+}
+
+static int get_required_var_bytes(JNIEnv* penv, jbyteArray jbytes, unsigned char** out, size_t* out_len, const char* name)
+{
+    if (jbytes == NULL) {
+        JNI_ThrowNull(penv, name);
+        return 0;
+    }
+    return get_var_bytes(penv, jbytes, out, out_len, name);
+}
+
+/* The session and D_sign always; the RPD and KSD, the transcript, the message and the certificate
+ * as the need flags say. Throws and returns NULL on malformed local input. */
+static jni_confederation_round* get_confederation_round(JNIEnv* penv, const secp256k1_context* ctx, int need, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jcertificate)
+{
+    jni_confederation_round* round = calloc(1, sizeof(*round));
+    if (round == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return NULL;
+    }
+    if (!get_bytes(penv, jsession, sizeof(round->session.data), round->session.data, "signing session")) goto fail;
+    if ((need & CONFEDERATION_NEED_KEYS)
+            && (!get_confederation_rpd(penv, ctx, jrpd, &round->rpd) || !get_confederation_ksd(penv, ctx, jksd, jrpd, &round->ksd, &round->rpd))) goto fail;
+    if (!get_required_var_bytes(penv, jdsign, &round->d_sign, &round->d_sign_len, "D_sign")) goto fail;
+    if ((need & CONFEDERATION_NEED_TRANSCRIPT) && !get_required_var_bytes(penv, jtranscript, &round->transcript, &round->transcript_len, "nonce transcript")) goto fail;
+    if ((need & CONFEDERATION_NEED_MESSAGE) && !get_bytes32(penv, jmessage, round->message, "message")) goto fail;
+    if ((need & CONFEDERATION_NEED_CERTIFICATE) && !get_required_var_bytes(penv, jcertificate, &round->certificate, &round->certificate_len, "confirmation certificate")) goto fail;
+    return round;
+fail:
+    jni_confederation_round_free(round);
+    return NULL;
+}
+
+/* Copies a Java array of fixed-size values into a zeroed buffer of max_count entries and a pointer
+ * array whose entries past the given ones are NULL. */
+static int get_confederation_padded(JNIEnv* penv, jobjectArray jvalues, size_t value_size, size_t max_count, unsigned char** flat, const unsigned char*** pointers, const char* name)
+{
+    jsize i, n;
+    *flat = NULL;
+    *pointers = NULL;
+    if (jvalues == NULL) {
+        JNI_ThrowNull(penv, name);
+        return 0;
+    }
+    n = (*penv)->GetArrayLength(penv, jvalues);
+    if (n <= 0 || (size_t)n > max_count) {
+        JNI_ThrowSecp256k1(penv, "invalid number of values");
+        return 0;
+    }
+    *flat = calloc(max_count, value_size);
+    *pointers = calloc(max_count, sizeof(**pointers));
+    if (*flat == NULL || *pointers == NULL) {
+        free(*flat);
+        free((void*)*pointers);
+        *flat = NULL;
+        *pointers = NULL;
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        jbyteArray jvalue = (jbyteArray)(*penv)->GetObjectArrayElement(penv, jvalues, i);
+        int ok = get_bytes(penv, jvalue, value_size, *flat + value_size * (size_t)i, name);
+        (*penv)->DeleteLocalRef(penv, jvalue);
+        if (!ok) {
+            jni_confederation_clear(*flat, max_count * value_size);
+            free(*flat);
+            free((void*)*pointers);
+            *flat = NULL;
+            *pointers = NULL;
+            return 0;
+        }
+        (*pointers)[i] = *flat + value_size * (size_t)i;
+    }
+    return 1;
+}
+
+static int get_confederation_share(JNIEnv* penv, const secp256k1_context* ctx, jbyteArray jshare, secp256k1_confederation_share* share, const secp256k1_confederation_ksd* ksd, const secp256k1_confederation_rpd* rpd)
+{
+    if (!get_bytes(penv, jshare, sizeof(share->data), share->data, "opaque share")) return 0;
+    if (!secp256k1_confederation_share_validate(ctx, share, ksd, rpd)) {
+        jni_confederation_clear(share->data, sizeof(share->data));
+        JNI_ThrowSecp256k1(penv, "invalid opaque share for descriptors");
+        return 0;
+    }
+    return 1;
+}
+
+/* Validates and copies a signing selection. Throws and returns 0 on a malformed one. */
+static int get_confederation_selection(JNIEnv* penv, jintArray jgroupids, jintArray jinnercounts, jintArray jadminids, uint32_t** group_ids, size_t* outer_count, uint32_t** inner_counts, uint32_t** admin_ids, size_t* signer_count)
+{
+    size_t inner_count = 0, sum = 0, i;
+    *group_ids = NULL;
+    *inner_counts = NULL;
+    *admin_ids = NULL;
+    if (jgroupids == NULL || jinnercounts == NULL || jadminids == NULL) {
+        JNI_ThrowNull(penv, "selection");
+        return 0;
+    }
+    *group_ids = get_signer_ids(penv, jgroupids, outer_count);
+    if (*group_ids == NULL) goto fail;
+    *inner_counts = get_signer_ids(penv, jinnercounts, &inner_count);
+    if (*inner_counts == NULL) goto fail;
+    *admin_ids = get_signer_ids(penv, jadminids, signer_count);
+    if (*admin_ids == NULL) goto fail;
+    if (*outer_count == 0 || *outer_count > SECP256K1_CONFEDERATION_MAX_GROUPS || inner_count != *outer_count
+            || *signer_count == 0 || *signer_count > SECP256K1_CONFEDERATION_MAX_ROLES) goto invalid;
+    for (i = 0; i < *outer_count; i++) {
+        if ((*group_ids)[i] >= SECP256K1_CONFEDERATION_MAX_GROUPS || (*inner_counts)[i] == 0
+                || (*inner_counts)[i] > SECP256K1_CONFEDERATION_MAX_ROLES || sum > SECP256K1_CONFEDERATION_MAX_ROLES - (*inner_counts)[i]) goto invalid;
+        sum += (*inner_counts)[i];
+    }
+    if (sum != *signer_count) goto invalid;
+    for (i = 0; i < *signer_count; i++) {
+        if ((*admin_ids)[i] >= SECP256K1_CONFEDERATION_MAX_ROLES) goto invalid;
+    }
+    return 1;
+invalid:
+    JNI_ThrowSecp256k1(penv, "invalid signing selection");
+fail:
+    free(*group_ids);
+    free(*inner_counts);
+    free(*admin_ids);
+    *group_ids = NULL;
+    *inner_counts = NULL;
+    *admin_ids = NULL;
+    return 0;
+}
+
+static size_t confederation_round_signer_count(const secp256k1_context* ctx, const secp256k1_confederation_sign_session* session)
+{
+    size_t transcript_len = 0;
+    if (!secp256k1_confederation_sign_message_sizes(ctx, session, NULL, &transcript_len, NULL) || transcript_len < 12) return 0;
+    return (transcript_len - 12) / 74;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1sign_1session_1init(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jrpd, jbyteArray jksd, jbyteArray jsessionid, jintArray jgroupids, jintArray jinnercounts, jintArray jadminids, jbyteArray jtweaksequence, jbyteArray jsessionout)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round = NULL;
+    unsigned char session_id[32];
+    unsigned char *tweak_sequence = NULL, *d_sign = NULL;
+    uint32_t *group_ids = NULL, *inner_counts = NULL, *admin_ids = NULL;
+    size_t outer_count = 0, signer_count = 0, tweak_len = 0, d_sign_len = 0;
+    jbyteArray out = NULL;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    round = calloc(1, sizeof(*round));
+    CHECKRESULT(round == NULL, "memory allocation failed");
+    if (!get_confederation_rpd(penv, ctx, jrpd, &round->rpd)) goto cleanup;
+    if (!get_confederation_ksd(penv, ctx, jksd, jrpd, &round->ksd, &round->rpd)) goto cleanup;
+    if (!get_bytes32(penv, jsessionid, session_id, "signing session id")) goto cleanup;
+    if (!get_confederation_selection(penv, jgroupids, jinnercounts, jadminids, &group_ids, &outer_count, &inner_counts, &admin_ids, &signer_count)) goto cleanup;
+    if (!get_confederation_input(penv, jtweaksequence, CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE, &tweak_sequence, &tweak_len, "tweak sequence")) goto cleanup;
+    if (tweak_len < 4) {
+        JNI_ThrowSecp256k1(penv, "invalid tweak sequence size");
+        goto cleanup;
+    }
+    /* A first call with no buffer reports D_sign's length. */
+    if (secp256k1_confederation_sign_session_init(ctx, &round->session, NULL, &d_sign_len, &round->rpd, &round->ksd, session_id, group_ids, (uint32_t)outer_count, inner_counts, admin_ids, (uint32_t)signer_count, tweak_sequence, tweak_len) || d_sign_len == 0) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_sign_session_init failed");
+        goto cleanup;
+    }
+    d_sign = malloc(d_sign_len);
+    if (d_sign == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_sign_session_init(ctx, &round->session, d_sign, &d_sign_len, &round->rpd, &round->ksd, session_id, group_ids, (uint32_t)outer_count, inner_counts, admin_ids, (uint32_t)signer_count, tweak_sequence, tweak_len)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_sign_session_init failed");
+        goto cleanup;
+    }
+    if (!put_confederation_bytes(penv, jsessionout, round->session.data, sizeof(round->session.data), "signing session")) goto cleanup;
+    out = copy_bytes_to_java(penv, d_sign, d_sign_len);
+cleanup:
+    free(round);
+    free(tweak_sequence);
+    free(d_sign);
+    free(group_ids);
+    free(inner_counts);
+    free(admin_ids);
+    return out;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1sign_1session_1check(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS, jsession, jrpd, jksd, jdsign, NULL, NULL, NULL);
+    if (round == NULL) return 0;
+    result = secp256k1_confederation_sign_session_check(ctx, &round->session, &round->rpd, &round->ksd, round->d_sign, round->d_sign_len);
+    jni_confederation_round_free(round);
+    return result;
+}
+
+JNIEXPORT jintArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1sign_1message_1sizes(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_sign_session session;
+    size_t sizes[3];
+    jint values[3];
+    jintArray out;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jsession, sizeof(session.data), session.data, "signing session")) return NULL;
+    CHECKRESULT(!secp256k1_confederation_sign_message_sizes(ctx, &session, &sizes[0], &sizes[1], &sizes[2]), "invalid signing session");
+    values[0] = (jint)sizes[0];
+    values[1] = (jint)sizes[1];
+    values[2] = (jint)sizes[2];
+    out = (*penv)->NewIntArray(penv, 3);
+    CHECKRESULT(out == NULL, "memory allocation failed");
+    (*penv)->SetIntArrayRegion(penv, out, 0, 3, values);
+    return out;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1signer_1nonce_1gen(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jshare, jbyteArray jdsign, jbyteArray jsecrand, jbyteArray jsignerout, jbyteArray jpubnonceout)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    secp256k1_confederation_share share;
+    secp256k1_confederation_signer signer;
+    unsigned char secrand[32], pubnonce[66];
+    int result = 0;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    memset(&signer, 0, sizeof(signer));
+    memset(&share, 0, sizeof(share));
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS, jsession, jrpd, jksd, jdsign, NULL, NULL, NULL);
+    if (round == NULL) return 0;
+    if (!get_confederation_share(penv, ctx, jshare, &share, &round->ksd, &round->rpd)) goto cleanup;
+    if (!get_bytes32(penv, jsecrand, secrand, "session secrand")) goto cleanup;
+    /* The randomness is spent whether or not the call succeeds: wipe the caller's copy now. */
+    {
+        unsigned char zero[32] = {0};
+        (*penv)->SetByteArrayRegion(penv, jsecrand, 0, 32, (const jbyte*)zero);
+    }
+    if (!secp256k1_confederation_signer_nonce_gen(ctx, &signer, pubnonce, &round->session, &round->rpd, &round->ksd, &share, round->d_sign, round->d_sign_len, secrand)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_signer_nonce_gen failed");
+        goto cleanup;
+    }
+    if (!put_confederation_bytes(penv, jsignerout, signer.data, sizeof(signer.data), "signer state")) goto cleanup;
+    if (!put_confederation_bytes(penv, jpubnonceout, pubnonce, sizeof(pubnonce), "public nonce")) {
+        unsigned char zero[sizeof(signer.data)] = {0};
+        (*penv)->SetByteArrayRegion(penv, jsignerout, 0, sizeof(zero), (const jbyte*)zero);
+        goto cleanup;
+    }
+    result = 1;
+cleanup:
+    jni_confederation_clear(secrand, sizeof(secrand));
+    jni_confederation_clear(&signer, sizeof(signer));
+    jni_confederation_clear(&share, sizeof(share));
+    jni_confederation_round_free(round);
+    return result;
+}
+
+JNIEXPORT void JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1signer_1abort(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsigner)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_signer signer;
+    if (ctx == NULL || jsigner == NULL || (*penv)->GetArrayLength(penv, jsigner) != (jsize)sizeof(signer.data)) {
+        JNI_ThrowSecp256k1(penv, "invalid signer state");
+        return;
+    }
+    memset(&signer, 0, sizeof(signer));
+    secp256k1_confederation_signer_abort(ctx, &signer);
+    (*penv)->SetByteArrayRegion(penv, jsigner, 0, sizeof(signer.data), (const jbyte*)signer.data);
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1nonce_1transcript_1write(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jobjectArray jpubnonces)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    secp256k1_confederation_sign_session session;
+    unsigned char *flat = NULL, *out = NULL;
+    const unsigned char** pointers = NULL;
+    size_t signers, out_len = 0;
+    jbyteArray result = NULL;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jsession, sizeof(session.data), session.data, "signing session")) return NULL;
+    signers = confederation_round_signer_count(ctx, &session);
+    CHECKRESULT(signers == 0, "invalid signing session");
+    CHECKRESULT(!secp256k1_confederation_sign_message_sizes(ctx, &session, NULL, &out_len, NULL), "invalid signing session");
+    CHECKRESULT(jpubnonces == NULL || (size_t)(*penv)->GetArrayLength(penv, jpubnonces) != signers, "public nonces must match the selected signers");
+    if (!get_confederation_padded(penv, jpubnonces, 66, SECP256K1_CONFEDERATION_MAX_ROLES, &flat, &pointers, "public nonce")) return NULL;
+    out = malloc(out_len);
+    if (out == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_nonce_transcript_write(ctx, out, &out_len, &session, pointers)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_nonce_transcript_write failed");
+        goto cleanup;
+    }
+    result = copy_bytes_to_java(penv, out, out_len);
+cleanup:
+    free(flat);
+    free((void*)pointers);
+    free(out);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1signer_1confirm(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsigner, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jhostseckey)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round = NULL;
+    secp256k1_confederation_signer signer;
+    unsigned char hostseckey[32], confirmation[64];
+    jbyteArray out = NULL;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    if (!get_bytes(penv, jsigner, sizeof(signer.data), signer.data, "signer state")) return NULL;
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS | CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE, jsession, jrpd, jksd, jdsign, jtranscript, jmessage, NULL);
+    if (round == NULL) goto cleanup;
+    if (!get_bytes32(penv, jhostseckey, hostseckey, "host secret key")) goto cleanup;
+    result = secp256k1_confederation_signer_confirm(ctx, &signer, confirmation, &round->session, &round->rpd, &round->ksd, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, hostseckey);
+    /* Confirmed on success, wiped on failure: either way the caller's copy becomes this one. */
+    (*penv)->SetByteArrayRegion(penv, jsigner, 0, sizeof(signer.data), (const jbyte*)signer.data);
+    if (!result) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_signer_confirm failed");
+        goto cleanup;
+    }
+    out = copy_bytes_to_java(penv, confirmation, sizeof(confirmation));
+cleanup:
+    jni_confederation_clear(&signer, sizeof(signer));
+    jni_confederation_clear(hostseckey, sizeof(hostseckey));
+    jni_confederation_round_free(round);
+    return out;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1confirmation_1certificate_1write(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jobjectArray jconfirmations)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    unsigned char *flat = NULL, *out = NULL;
+    const unsigned char** pointers = NULL;
+    size_t signers, out_len = 0;
+    jbyteArray result = NULL;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE, jsession, NULL, NULL, jdsign, jtranscript, jmessage, NULL);
+    if (round == NULL) return NULL;
+    signers = confederation_round_signer_count(ctx, &round->session);
+    if (signers == 0 || !secp256k1_confederation_sign_message_sizes(ctx, &round->session, NULL, NULL, &out_len)) {
+        JNI_ThrowSecp256k1(penv, "invalid signing session");
+        goto cleanup;
+    }
+    if (jconfirmations == NULL || (size_t)(*penv)->GetArrayLength(penv, jconfirmations) != signers) {
+        JNI_ThrowSecp256k1(penv, "confirmations must match the selected signers");
+        goto cleanup;
+    }
+    if (!get_confederation_padded(penv, jconfirmations, 64, SECP256K1_CONFEDERATION_MAX_ROLES, &flat, &pointers, "confirmation")) goto cleanup;
+    out = malloc(out_len);
+    if (out == NULL) {
+        JNI_ThrowSecp256k1(penv, "memory allocation failed");
+        goto cleanup;
+    }
+    if (!secp256k1_confederation_confirmation_certificate_write(ctx, out, &out_len, &round->session, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, pointers)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_confirmation_certificate_write failed");
+        goto cleanup;
+    }
+    result = copy_bytes_to_java(penv, out, out_len);
+cleanup:
+    free(flat);
+    free((void*)pointers);
+    free(out);
+    jni_confederation_round_free(round);
+    return result;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1confirmation_1verify(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jcertificate)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS | CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE | CONFEDERATION_NEED_CERTIFICATE, jsession, jrpd, jksd, jdsign, jtranscript, jmessage, jcertificate);
+    if (round == NULL) return 0;
+    result = secp256k1_confederation_confirmation_verify(ctx, &round->session, &round->rpd, &round->ksd, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, round->certificate, round->certificate_len);
+    jni_confederation_round_free(round);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1signer_1partial(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsigner, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jshare, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jcertificate)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round = NULL;
+    secp256k1_confederation_signer signer;
+    secp256k1_confederation_share share;
+    unsigned char partial[32];
+    jbyteArray out = NULL;
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    memset(&share, 0, sizeof(share));
+    if (!get_bytes(penv, jsigner, sizeof(signer.data), signer.data, "signer state")) return NULL;
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS | CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE | CONFEDERATION_NEED_CERTIFICATE, jsession, jrpd, jksd, jdsign, jtranscript, jmessage, jcertificate);
+    if (round == NULL) goto cleanup;
+    if (!get_confederation_share(penv, ctx, jshare, &share, &round->ksd, &round->rpd)) goto cleanup;
+    result = secp256k1_confederation_signer_partial(ctx, partial, &signer, &round->session, &round->rpd, &round->ksd, &share, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, round->certificate, round->certificate_len);
+    /* Consumed either way. */
+    (*penv)->SetByteArrayRegion(penv, jsigner, 0, sizeof(signer.data), (const jbyte*)signer.data);
+    if (!result) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_signer_partial failed");
+        goto cleanup;
+    }
+    out = copy_bytes_to_java(penv, partial, sizeof(partial));
+cleanup:
+    jni_confederation_clear(&signer, sizeof(signer));
+    jni_confederation_clear(&share, sizeof(share));
+    jni_confederation_round_free(round);
+    return out;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1member_1partial_1verify(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jpartial, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jcertificate, jint jselectedindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    unsigned char partial[32];
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jselectedindex < 0, "invalid selected index");
+    if (!get_bytes32(penv, jpartial, partial, "member partial")) return 0;
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS | CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE | CONFEDERATION_NEED_CERTIFICATE, jsession, jrpd, jksd, jdsign, jtranscript, jmessage, jcertificate);
+    if (round == NULL) return 0;
+    result = secp256k1_confederation_member_partial_verify(ctx, partial, &round->session, &round->rpd, &round->ksd, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, round->certificate, round->certificate_len, (uint32_t)jselectedindex);
+    jni_confederation_round_free(round);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1group_1partial_1aggregate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jcertificate, jint jouterindex, jobjectArray jpartials)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    unsigned char group_partial[SECP256K1_CONFEDERATION_GROUP_PARTIAL_SIZE];
+    unsigned char* flat = NULL;
+    const unsigned char** pointers = NULL;
+    jbyteArray out = NULL;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jouterindex < 0, "invalid outer index");
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS | CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE | CONFEDERATION_NEED_CERTIFICATE, jsession, jrpd, jksd, jdsign, jtranscript, jmessage, jcertificate);
+    if (round == NULL) return NULL;
+    if (!get_confederation_padded(penv, jpartials, 32, SECP256K1_CONFEDERATION_MAX_ROLES, &flat, &pointers, "member partial")) goto cleanup;
+    if (!secp256k1_confederation_group_partial_aggregate(ctx, group_partial, &round->session, &round->rpd, &round->ksd, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, round->certificate, round->certificate_len, (uint32_t)jouterindex, pointers)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_group_partial_aggregate failed");
+        goto cleanup;
+    }
+    out = copy_bytes_to_java(penv, group_partial, sizeof(group_partial));
+cleanup:
+    free(flat);
+    free((void*)pointers);
+    jni_confederation_round_free(round);
+    return out;
+}
+
+JNIEXPORT jint JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1group_1partial_1verify(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jgrouppartial, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jcertificate, jint jouterindex)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    unsigned char group_partial[SECP256K1_CONFEDERATION_GROUP_PARTIAL_SIZE];
+    int result;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    CHECKRESULT(jouterindex < 0, "invalid outer index");
+    if (!get_bytes(penv, jgrouppartial, sizeof(group_partial), group_partial, "group partial")) return 0;
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS | CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE | CONFEDERATION_NEED_CERTIFICATE, jsession, jrpd, jksd, jdsign, jtranscript, jmessage, jcertificate);
+    if (round == NULL) return 0;
+    result = secp256k1_confederation_group_partial_verify(ctx, group_partial, &round->session, &round->rpd, &round->ksd, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, round->certificate, round->certificate_len, (uint32_t)jouterindex);
+    jni_confederation_round_free(round);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_fr_acinq_secp256k1_Secp256k1CFunctions_secp256k1_1confederation_1outer_1aggregate(JNIEnv* penv, jclass clazz, jlong jctx, jbyteArray jsession, jbyteArray jrpd, jbyteArray jksd, jbyteArray jdsign, jbyteArray jtranscript, jbyteArray jmessage, jbyteArray jcertificate, jobjectArray jgrouppartials)
+{
+    const secp256k1_context* ctx = (const secp256k1_context*)jctx;
+    jni_confederation_round* round;
+    unsigned char signature[64];
+    unsigned char* flat = NULL;
+    const unsigned char** pointers = NULL;
+    jbyteArray out = NULL;
+    CHECKRESULT(ctx == NULL, "secp256k1 context cannot be null");
+    round = get_confederation_round(penv, ctx, CONFEDERATION_NEED_KEYS | CONFEDERATION_NEED_TRANSCRIPT | CONFEDERATION_NEED_MESSAGE | CONFEDERATION_NEED_CERTIFICATE, jsession, jrpd, jksd, jdsign, jtranscript, jmessage, jcertificate);
+    if (round == NULL) return NULL;
+    /* The group partials are read as one buffer of outer_count entries; padding it to the maximum
+     * keeps a short array inside the allocation, where its zeroed entries fail to parse. */
+    if (!get_confederation_padded(penv, jgrouppartials, SECP256K1_CONFEDERATION_GROUP_PARTIAL_SIZE, SECP256K1_CONFEDERATION_MAX_GROUPS, &flat, &pointers, "group partial")) goto cleanup;
+    if (!secp256k1_confederation_outer_aggregate(ctx, signature, &round->session, &round->rpd, &round->ksd, round->d_sign, round->d_sign_len, round->transcript, round->transcript_len, round->message, round->certificate, round->certificate_len, flat)) {
+        JNI_ThrowSecp256k1(penv, "secp256k1_confederation_outer_aggregate failed");
+        goto cleanup;
+    }
+    out = copy_bytes_to_java(penv, signature, sizeof(signature));
+cleanup:
+    free(flat);
+    free((void*)pointers);
+    jni_confederation_round_free(round);
+    return out;
 }

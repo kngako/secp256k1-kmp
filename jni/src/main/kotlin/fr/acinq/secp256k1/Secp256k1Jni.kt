@@ -1046,7 +1046,7 @@ public object Secp256k1Jni : Secp256k1 {
         return ConfederationDkgResult(ksd, transition, shares, recoveries)
     }
 
-    override fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray): ByteArray {
+    override fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray, nonceSecrands32: Array<ByteArray>): ByteArray {
         require(rpd.size == Secp256k1.CONFEDERATION_RPD_SIZE) { "invalid opaque RPD size" }
         require(ksd.size == Secp256k1.CONFEDERATION_KSD_SIZE) { "invalid opaque KSD size" }
         requireConfederationRoleValues(shares, "shares", Secp256k1.CONFEDERATION_SHARE_SIZE)
@@ -1061,7 +1061,9 @@ public object Secp256k1Jni : Secp256k1 {
         require(adminIds.all { it < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt() }) { "invalid admin id" }
         require(tweakSequence.size in 4..Secp256k1.CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE) { "invalid tweak sequence size" }
         require(message32.size == 32) { "message must be 32 bytes" }
-        return Secp256k1CFunctions.secp256k1_confederation_sign(Secp256k1Context.getContext(), rpd, ksd, shares, hostSeckeys32, signingSessionId32, groupIds.toIntArray(), innerCounts, adminIds.toIntArray(), tweakSequence, message32)
+        requireConfederationRoleValues(nonceSecrands32, "nonce secrands", 32)
+        require(nonceSecrands32.size == adminIds.size) { "nonce secrands must match the selected signers" }
+        return Secp256k1CFunctions.secp256k1_confederation_sign(Secp256k1Context.getContext(), rpd, ksd, shares, hostSeckeys32, signingSessionId32, groupIds.toIntArray(), innerCounts, adminIds.toIntArray(), tweakSequence, message32, nonceSecrands32)
     }
 
     override fun confederationKsdPubkeyGet(ksd: ByteArray, rpd: ByteArray): ByteArray {
@@ -1207,5 +1209,126 @@ public object Secp256k1Jni : Secp256k1 {
         val result = Secp256k1CFunctions.secp256k1_confederation_dkg_investigate(Secp256k1Context.getContext(), rpd, groupId.toInt(), adminId.toInt(), hostseckey32, broadcast, responses, fault)
         if (result != 1 && (fault[0] == ConfederationFault.INVALID_INPUT || fault[0] == ConfederationFault.NONE)) throw Secp256k1Exception("secp256k1_confederation_dkg_investigate failed")
         return confederationFault(fault)
+    }
+    private fun requireSignSession(session: ByteArray) = require(session.size == Secp256k1.CONFEDERATION_SIGN_SESSION_SIZE) { "invalid opaque signing session size" }
+    private fun requireSigner(signer: ByteArray) = require(signer.size == Secp256k1.CONFEDERATION_SIGNER_SIZE) { "invalid signer state size" }
+    private fun requireShare(share: ByteArray) = require(share.size == Secp256k1.CONFEDERATION_SHARE_SIZE) { "invalid opaque share size" }
+
+    private fun requireSigningRound(session: ByteArray, rpd: ByteArray, ksd: ByteArray, message32: ByteArray) {
+        requireSignSession(session)
+        requireRpd(rpd)
+        requireKsd(ksd)
+        require32(message32, "message")
+    }
+
+    private fun requireSelection(groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray) {
+        require(groupIds.isNotEmpty() && groupIds.size <= Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid outer group count" }
+        require(groupIds.all { it < Secp256k1.CONFEDERATION_MAX_GROUPS.toUInt() }) { "invalid group id" }
+        require(innerCounts.size == groupIds.size) { "inner counts must match outer groups" }
+        require(innerCounts.all { it in 1..Secp256k1.CONFEDERATION_MAX_ROLES }) { "invalid inner signer count" }
+        require(adminIds.size == innerCounts.sum()) { "admin ids must match inner signer counts" }
+        require(adminIds.size <= Secp256k1.CONFEDERATION_MAX_ROLES) { "too many signers" }
+        require(adminIds.all { it < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt() }) { "invalid admin id" }
+    }
+
+    override fun confederationSignSessionInit(rpd: ByteArray, ksd: ByteArray, sessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray): ConfederationSignSession {
+        requireRpd(rpd)
+        requireKsd(ksd)
+        require32(sessionId32, "signing session id")
+        requireSelection(groupIds, innerCounts, adminIds)
+        require(tweakSequence.size in 4..Secp256k1.CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE) { "invalid tweak sequence size" }
+        val session = ByteArray(Secp256k1.CONFEDERATION_SIGN_SESSION_SIZE)
+        val dSign = Secp256k1CFunctions.secp256k1_confederation_sign_session_init(Secp256k1Context.getContext(), rpd, ksd, sessionId32, groupIds.toIntArray(), innerCounts, adminIds.toIntArray(), tweakSequence, session)
+        return ConfederationSignSession(session, dSign)
+    }
+
+    override fun confederationSignSessionCheck(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray): Boolean {
+        requireSignSession(session)
+        requireRpd(rpd)
+        requireKsd(ksd)
+        return Secp256k1CFunctions.secp256k1_confederation_sign_session_check(Secp256k1Context.getContext(), session, rpd, ksd, dSign) == 1
+    }
+
+    override fun confederationSignMessageSizes(session: ByteArray): ConfederationSignMessageSizes {
+        requireSignSession(session)
+        val sizes = Secp256k1CFunctions.secp256k1_confederation_sign_message_sizes(Secp256k1Context.getContext(), session)
+        return ConfederationSignMessageSizes(sizes[0], sizes[1], sizes[2])
+    }
+
+    override fun confederationSignerNonceGen(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, share: ByteArray, dSign: ByteArray, sessionSecrand32: ByteArray): ByteArray {
+        requireSigner(signer)
+        requireSignSession(session)
+        requireRpd(rpd)
+        requireKsd(ksd)
+        requireShare(share)
+        require32(sessionSecrand32, "session secrand")
+        val pubnonce = ByteArray(66)
+        Secp256k1CFunctions.secp256k1_confederation_signer_nonce_gen(Secp256k1Context.getContext(), session, rpd, ksd, share, dSign, sessionSecrand32, signer, pubnonce)
+        return pubnonce
+    }
+
+    override fun confederationSignerAbort(signer: ByteArray) {
+        requireSigner(signer)
+        Secp256k1CFunctions.secp256k1_confederation_signer_abort(Secp256k1Context.getContext(), signer)
+    }
+
+    override fun confederationNonceTranscriptWrite(session: ByteArray, pubnonces66: Array<ByteArray>): ByteArray {
+        requireSignSession(session)
+        requireConfederationRoleValues(pubnonces66, "public nonces", 66)
+        return Secp256k1CFunctions.secp256k1_confederation_nonce_transcript_write(Secp256k1Context.getContext(), session, pubnonces66)
+    }
+
+    override fun confederationSignerConfirm(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, hostseckey32: ByteArray): ByteArray {
+        requireSigner(signer)
+        requireSigningRound(session, rpd, ksd, message32)
+        require32(hostseckey32, "host secret key")
+        return Secp256k1CFunctions.secp256k1_confederation_signer_confirm(Secp256k1Context.getContext(), signer, session, rpd, ksd, dSign, nonceTranscript, message32, hostseckey32)
+    }
+
+    override fun confederationConfirmationCertificateWrite(session: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, confirmations64: Array<ByteArray>): ByteArray {
+        requireSignSession(session)
+        require32(message32, "message")
+        requireConfederationRoleValues(confirmations64, "confirmations", 64)
+        return Secp256k1CFunctions.secp256k1_confederation_confirmation_certificate_write(Secp256k1Context.getContext(), session, dSign, nonceTranscript, message32, confirmations64)
+    }
+
+    override fun confederationConfirmationVerify(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray): Boolean {
+        requireSigningRound(session, rpd, ksd, message32)
+        return Secp256k1CFunctions.secp256k1_confederation_confirmation_verify(Secp256k1Context.getContext(), session, rpd, ksd, dSign, nonceTranscript, message32, certificate) == 1
+    }
+
+    override fun confederationSignerPartial(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, share: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray): ByteArray {
+        requireSigner(signer)
+        requireSigningRound(session, rpd, ksd, message32)
+        requireShare(share)
+        return Secp256k1CFunctions.secp256k1_confederation_signer_partial(Secp256k1Context.getContext(), signer, session, rpd, ksd, share, dSign, nonceTranscript, message32, certificate)
+    }
+
+    override fun confederationMemberPartialVerify(partial32: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, selectedIndex: Int): Boolean {
+        require32(partial32, "member partial")
+        requireSigningRound(session, rpd, ksd, message32)
+        require(selectedIndex in 0 until Secp256k1.CONFEDERATION_MAX_ROLES) { "invalid selected index" }
+        return Secp256k1CFunctions.secp256k1_confederation_member_partial_verify(Secp256k1Context.getContext(), partial32, session, rpd, ksd, dSign, nonceTranscript, message32, certificate, selectedIndex) == 1
+    }
+
+    override fun confederationGroupPartialAggregate(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, outerIndex: Int, partials32: Array<ByteArray>): ByteArray {
+        requireSigningRound(session, rpd, ksd, message32)
+        require(outerIndex in 0 until Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid outer index" }
+        requireConfederationRoleValues(partials32, "member partials", 32)
+        return Secp256k1CFunctions.secp256k1_confederation_group_partial_aggregate(Secp256k1Context.getContext(), session, rpd, ksd, dSign, nonceTranscript, message32, certificate, outerIndex, partials32)
+    }
+
+    override fun confederationGroupPartialVerify(groupPartial36: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, outerIndex: Int): Boolean {
+        require(groupPartial36.size == Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE) { "group partial must be ${Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE} bytes" }
+        requireSigningRound(session, rpd, ksd, message32)
+        require(outerIndex in 0 until Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid outer index" }
+        return Secp256k1CFunctions.secp256k1_confederation_group_partial_verify(Secp256k1Context.getContext(), groupPartial36, session, rpd, ksd, dSign, nonceTranscript, message32, certificate, outerIndex) == 1
+    }
+
+    override fun confederationOuterAggregate(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, groupPartials36: Array<ByteArray>): ByteArray {
+        requireSigningRound(session, rpd, ksd, message32)
+        require(groupPartials36.isNotEmpty() && groupPartials36.size <= Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid group partial count" }
+        groupPartials36.forEach { require(it.size == Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE) { "group partials must be ${Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE} bytes" } }
+        return Secp256k1CFunctions.secp256k1_confederation_outer_aggregate(Secp256k1Context.getContext(), session, rpd, ksd, dSign, nonceTranscript, message32, certificate, groupPartials36)
     }
 }

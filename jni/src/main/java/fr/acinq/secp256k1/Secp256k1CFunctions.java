@@ -394,7 +394,7 @@ public class Secp256k1CFunctions {
     /* Returns opaque KSD || transition || role-count shares || role-count recoveries. */
     public static native byte[] secp256k1_confederation_dkg(long ctx, byte[] rpd, byte[] session_seed32, byte[][] hostseckeys32, byte[][] dealer_seeds32, byte[][] recovery_nonces32);
 
-    public static native byte[] secp256k1_confederation_sign(long ctx, byte[] rpd, byte[] ksd, byte[][] shares, byte[][] hostseckeys32, byte[] signing_session_id32, int[] group_ids, int[] inner_counts, int[] admin_ids, byte[] tweak_sequence, byte[] message32);
+    public static native byte[] secp256k1_confederation_sign(long ctx, byte[] rpd, byte[] ksd, byte[][] shares, byte[][] hostseckeys32, byte[] signing_session_id32, int[] group_ids, int[] inner_counts, int[] admin_ids, byte[] tweak_sequence, byte[] message32, byte[][] nonce_secrands32);
 
     public static native byte[] secp256k1_confederation_ksd_pubkey_get(long ctx, byte[] ksd, byte[] rpd);
     public static native int[] secp256k1_confederation_dkg_message_sizes(long ctx, byte[] rpd);
@@ -422,4 +422,31 @@ public class Secp256k1CFunctions {
     public static native byte[] secp256k1_confederation_dkg_investigation_response(long ctx, byte[] rpd, byte[] session_seed32, int dealer_group_id, int dealer_admin_id, byte[] ciphertexts);
 
     public static native int secp256k1_confederation_dkg_investigate(long ctx, byte[] rpd, int group_id, int admin_id, byte[] hostseckey32, byte[] broadcast, byte[] responses, int[] fault);
+    public static native byte[] secp256k1_confederation_sign_session_init(long ctx, byte[] rpd, byte[] ksd, byte[] session_id32, int[] group_ids, int[] inner_counts, int[] admin_ids, byte[] tweak_sequence, byte[] session_out);
+
+    public static native int secp256k1_confederation_sign_session_check(long ctx, byte[] session, byte[] rpd, byte[] ksd, byte[] d_sign);
+
+    public static native int[] secp256k1_confederation_sign_message_sizes(long ctx, byte[] session);
+
+    public static native int secp256k1_confederation_signer_nonce_gen(long ctx, byte[] session, byte[] rpd, byte[] ksd, byte[] share, byte[] d_sign, byte[] session_secrand32, byte[] signer_out, byte[] pubnonce_out);
+
+    public static native void secp256k1_confederation_signer_abort(long ctx, byte[] signer);
+
+    public static native byte[] secp256k1_confederation_nonce_transcript_write(long ctx, byte[] session, byte[][] pubnonces66);
+
+    public static native byte[] secp256k1_confederation_signer_confirm(long ctx, byte[] signer, byte[] session, byte[] rpd, byte[] ksd, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[] hostseckey32);
+
+    public static native byte[] secp256k1_confederation_confirmation_certificate_write(long ctx, byte[] session, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[][] confirmations64);
+
+    public static native int secp256k1_confederation_confirmation_verify(long ctx, byte[] session, byte[] rpd, byte[] ksd, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[] certificate);
+
+    public static native byte[] secp256k1_confederation_signer_partial(long ctx, byte[] signer, byte[] session, byte[] rpd, byte[] ksd, byte[] share, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[] certificate);
+
+    public static native int secp256k1_confederation_member_partial_verify(long ctx, byte[] partial32, byte[] session, byte[] rpd, byte[] ksd, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[] certificate, int selected_index);
+
+    public static native byte[] secp256k1_confederation_group_partial_aggregate(long ctx, byte[] session, byte[] rpd, byte[] ksd, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[] certificate, int outer_index, byte[][] partials32);
+
+    public static native int secp256k1_confederation_group_partial_verify(long ctx, byte[] group_partial36, byte[] session, byte[] rpd, byte[] ksd, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[] certificate, int outer_index);
+
+    public static native byte[] secp256k1_confederation_outer_aggregate(long ctx, byte[] session, byte[] rpd, byte[] ksd, byte[] d_sign, byte[] nonce_transcript, byte[] message32, byte[] certificate, byte[][] group_partials36);
 }

@@ -2122,7 +2122,7 @@ public object Secp256k1Native : Secp256k1 {
         }
     }
 
-    override fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray): ByteArray = memScoped {
+    override fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray, nonceSecrands32: Array<ByteArray>): ByteArray = memScoped {
         requireConfederationRoleValues(shares, "shares", Secp256k1.CONFEDERATION_SHARE_SIZE)
         requireConfederationRoleValues(hostSeckeys32, "host secret keys", 32)
         require(signingSessionId32.size == 32) { "signing session id must be 32 bytes" }
@@ -2135,10 +2135,15 @@ public object Secp256k1Native : Secp256k1 {
         require(adminIds.all { it < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt() }) { "invalid admin id" }
         require(tweakSequence.size in 4..Secp256k1.CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE) { "invalid tweak sequence size" }
         require(message32.size == 32) { "message must be 32 bytes" }
+        requireConfederationRoleValues(nonceSecrands32, "nonce secrands", 32)
+        require(nonceSecrands32.size == adminIds.size) { "nonce secrands must match the selected signers" }
         val state = allocConfederationState(rpd, ksd)
         val roleCount = confederationRoleCount(state.rpd)
         if (shares.size != roleCount || hostSeckeys32.size != roleCount) throw Secp256k1Exception("shares and host secret keys must match the RPD role count")
         val hostFlat = flatBytes(hostSeckeys32, 32, "host secret key")
+        // The randomness is spent whether or not signing succeeds: the caller's copies are wiped now.
+        val secrandFlat = flatBytes(nonceSecrands32, 32, "nonce secrand")
+        nonceSecrands32.forEach { it.fill(0) }
         val nShares = allocArray<secp256k1_confederation_share>(roleCount)
         try {
             shares.forEachIndexed { index, share ->
@@ -2162,10 +2167,12 @@ public object Secp256k1Native : Secp256k1 {
                 toNat(tweakSequence),
                 tweakSequence.size.convert(),
                 toNat(message32),
+                toNat(secrandFlat),
             ).requireSuccess("secp256k1_confederation_sign() failed")
             signature
         } finally {
             hostFlat.fill(0)
+            secrandFlat.fill(0)
             memset(nShares, 0, (roleCount * Secp256k1.CONFEDERATION_SHARE_SIZE).convert())
         }
     }
@@ -2348,6 +2355,234 @@ public object Secp256k1Native : Secp256k1 {
         val f = fault.fault()
         if (result != 1 && (f.code == ConfederationFault.INVALID_INPUT || f.code == ConfederationFault.NONE)) throw Secp256k1Exception("secp256k1_confederation_dkg_investigate() failed")
         f
+    }
+
+    private fun MemScope.allocSignSession(session: ByteArray): secp256k1_confederation_sign_session {
+        require(session.size == Secp256k1.CONFEDERATION_SIGN_SESSION_SIZE) { "invalid opaque signing session size" }
+        val nSession = alloc<secp256k1_confederation_sign_session>()
+        memcpy(nSession.ptr, toNat(session), Secp256k1.CONFEDERATION_SIGN_SESSION_SIZE.convert())
+        return nSession
+    }
+
+    private fun MemScope.allocValidShare(share: ByteArray, state: ConfederationNativeState): secp256k1_confederation_share {
+        val nShare = allocConfederationShare(share)
+        if (secp256k1_confederation_share_validate(ctx, nShare.ptr, state.ksd.ptr, state.rpd.ptr) != 1) {
+            memset(nShare.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+            throw Secp256k1Exception("invalid opaque share for descriptors")
+        }
+        return nShare
+    }
+
+    /* The signer state crosses in and out: copied in, rewritten by the call (confirmed or wiped), copied back, and
+     * the native copy cleared. */
+    private inline fun <T> MemScope.withSigner(signer: ByteArray, block: (secp256k1_confederation_signer) -> T): T {
+        require(signer.size == Secp256k1.CONFEDERATION_SIGNER_SIZE) { "invalid signer state size" }
+        val nSigner = alloc<secp256k1_confederation_signer>()
+        memcpy(nSigner.ptr, toNat(signer), Secp256k1.CONFEDERATION_SIGNER_SIZE.convert())
+        try {
+            return block(nSigner)
+        } finally {
+            memcpy(toNat(signer), nSigner.ptr, Secp256k1.CONFEDERATION_SIGNER_SIZE.convert())
+            memset(nSigner.ptr, 0, Secp256k1.CONFEDERATION_SIGNER_SIZE.convert())
+        }
+    }
+
+    /* A zeroed buffer of max entries and a pointer array NULL past the given ones, so a short array fails in the
+     * library rather than reading past what was given. */
+    private class PaddedValues(val flat: CArrayPointer<UByteVar>, val pointers: CArrayPointer<CPointerVar<UByteVar>>)
+
+    private fun MemScope.paddedValues(values: Array<ByteArray>, valueSize: Int, max: Int, name: String): PaddedValues {
+        require(values.isNotEmpty() && values.size <= max) { "invalid $name count" }
+        val flat = allocArray<UByteVar>(max * valueSize)
+        memset(flat, 0, (max * valueSize).convert())
+        val pointers = allocArray<CPointerVar<UByteVar>>(max)
+        for (i in 0 until max) pointers[i] = null
+        values.forEachIndexed { i, value ->
+            require(value.size == valueSize) { "$name entries must be $valueSize bytes" }
+            val at = (flat + i * valueSize)!!
+            memcpy(at, toNat(value), valueSize.convert())
+            pointers[i] = at
+        }
+        return PaddedValues(flat, pointers)
+    }
+
+    private class SigningRound(
+        val session: secp256k1_confederation_sign_session,
+        val state: ConfederationNativeState,
+        val dSign: CPointer<UByteVar>, val dSignLen: Int,
+        val transcript: CPointer<UByteVar>, val transcriptLen: Int,
+        val message: CPointer<UByteVar>,
+        val certificate: CPointer<UByteVar>, val certificateLen: Int,
+    )
+
+    private fun MemScope.signingRound(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray = ByteArray(0)): SigningRound {
+        require32(message32, "message")
+        return SigningRound(
+            allocSignSession(session), allocConfederationState(rpd, ksd),
+            toNatAllowEmpty(dSign), dSign.size, toNatAllowEmpty(nonceTranscript), nonceTranscript.size,
+            toNat(message32), toNatAllowEmpty(certificate), certificate.size,
+        )
+    }
+
+    private fun requireSelection(groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray) {
+        require(groupIds.isNotEmpty() && groupIds.size <= Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid outer group count" }
+        require(groupIds.all { it < Secp256k1.CONFEDERATION_MAX_GROUPS.toUInt() }) { "invalid group id" }
+        require(innerCounts.size == groupIds.size) { "inner counts must match outer groups" }
+        require(innerCounts.all { it in 1..Secp256k1.CONFEDERATION_MAX_ROLES }) { "invalid inner signer count" }
+        require(adminIds.size == innerCounts.sum()) { "admin ids must match inner signer counts" }
+        require(adminIds.size <= Secp256k1.CONFEDERATION_MAX_ROLES) { "too many signers" }
+        require(adminIds.all { it < Secp256k1.CONFEDERATION_MAX_ROLES.toUInt() }) { "invalid admin id" }
+    }
+
+    override fun confederationSignSessionInit(rpd: ByteArray, ksd: ByteArray, sessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray): ConfederationSignSession = memScoped {
+        require32(sessionId32, "signing session id")
+        requireSelection(groupIds, innerCounts, adminIds)
+        require(tweakSequence.size in 4..Secp256k1.CONFEDERATION_TWEAK_SEQUENCE_MAX_SIZE) { "invalid tweak sequence size" }
+        val state = allocConfederationState(rpd, ksd)
+        val nSession = alloc<secp256k1_confederation_sign_session>()
+        val dSignLen = alloc<size_tVar>()
+        val nGroupIds = groupIds.toCValues()
+        val nInnerCounts = innerCounts.map { it.toUInt() }.toUIntArray().toCValues()
+        val nAdminIds = adminIds.toCValues()
+        fun init(out: CPointer<UByteVar>?): Int = secp256k1_confederation_sign_session_init(
+            ctx, nSession.ptr, out, dSignLen.ptr, state.rpd.ptr, state.ksd.ptr, toNat(sessionId32),
+            nGroupIds, groupIds.size.toUInt(), nInnerCounts, nAdminIds, adminIds.size.toUInt(), toNat(tweakSequence), tweakSequence.size.convert(),
+        )
+        // A first call with no buffer reports D_sign's length.
+        dSignLen.value = 0.convert()
+        if (init(null) == 1 || dSignLen.value.toInt() == 0) throw Secp256k1Exception("secp256k1_confederation_sign_session_init() failed")
+        val dSign = ByteArray(dSignLen.value.toInt())
+        init(toNat(dSign)).requireSuccess("secp256k1_confederation_sign_session_init() failed")
+        ConfederationSignSession(nSession.ptr.readBytes(Secp256k1.CONFEDERATION_SIGN_SESSION_SIZE), dSign.copyOf(dSignLen.value.toInt()))
+    }
+
+    override fun confederationSignSessionCheck(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray): Boolean = memScoped {
+        val nSession = allocSignSession(session)
+        val state = allocConfederationState(rpd, ksd)
+        secp256k1_confederation_sign_session_check(ctx, nSession.ptr, state.rpd.ptr, state.ksd.ptr, toNatAllowEmpty(dSign), dSign.size.convert()) == 1
+    }
+
+    override fun confederationSignMessageSizes(session: ByteArray): ConfederationSignMessageSizes = memScoped {
+        val sizes = List(3) { alloc<size_tVar>() }
+        secp256k1_confederation_sign_message_sizes(ctx, allocSignSession(session).ptr, sizes[0].ptr, sizes[1].ptr, sizes[2].ptr).requireSuccess("invalid signing session")
+        ConfederationSignMessageSizes(sizes[0].value.toInt(), sizes[1].value.toInt(), sizes[2].value.toInt())
+    }
+
+    override fun confederationSignerNonceGen(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, share: ByteArray, dSign: ByteArray, sessionSecrand32: ByteArray): ByteArray = memScoped {
+        require(signer.size == Secp256k1.CONFEDERATION_SIGNER_SIZE) { "invalid signer state size" }
+        require32(sessionSecrand32, "session secrand")
+        val nSession = allocSignSession(session)
+        val state = allocConfederationState(rpd, ksd)
+        val nShare = allocValidShare(share, state)
+        val nSigner = alloc<secp256k1_confederation_signer>()
+        val pubnonce = ByteArray(66)
+        try {
+            // The library wipes the randomness in place, which is the caller's array.
+            secp256k1_confederation_signer_nonce_gen(ctx, nSigner.ptr, toNat(pubnonce), nSession.ptr, state.rpd.ptr, state.ksd.ptr, nShare.ptr, toNatAllowEmpty(dSign), dSign.size.convert(), toNat(sessionSecrand32))
+                .requireSuccess("secp256k1_confederation_signer_nonce_gen() failed")
+            memcpy(toNat(signer), nSigner.ptr, Secp256k1.CONFEDERATION_SIGNER_SIZE.convert())
+            pubnonce
+        } finally {
+            sessionSecrand32.fill(0)
+            memset(nSigner.ptr, 0, Secp256k1.CONFEDERATION_SIGNER_SIZE.convert())
+            memset(nShare.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+        }
+    }
+
+    override fun confederationSignerAbort(signer: ByteArray) {
+        require(signer.size == Secp256k1.CONFEDERATION_SIGNER_SIZE) { "invalid signer state size" }
+        signer.fill(0)
+    }
+
+    override fun confederationNonceTranscriptWrite(session: ByteArray, pubnonces66: Array<ByteArray>): ByteArray = memScoped {
+        val nSession = allocSignSession(session)
+        val sizes = confederationSignMessageSizes(session)
+        if (pubnonces66.size != (sizes.nonceTranscript - 12) / 74) throw Secp256k1Exception("public nonces must match the selected signers")
+        val padded = paddedValues(pubnonces66, 66, Secp256k1.CONFEDERATION_MAX_ROLES, "public nonce")
+        val out = ByteArray(sizes.nonceTranscript)
+        val outLen = alloc<size_tVar>()
+        outLen.value = out.size.convert()
+        secp256k1_confederation_nonce_transcript_write(ctx, toNat(out), outLen.ptr, nSession.ptr, padded.pointers).requireSuccess("secp256k1_confederation_nonce_transcript_write() failed")
+        out.copyOf(outLen.value.toInt())
+    }
+
+    override fun confederationSignerConfirm(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, hostseckey32: ByteArray): ByteArray = memScoped {
+        require32(hostseckey32, "host secret key")
+        val round = signingRound(session, rpd, ksd, dSign, nonceTranscript, message32)
+        withSigner(signer) { nSigner ->
+            val confirmation = ByteArray(64)
+            secp256k1_confederation_signer_confirm(ctx, nSigner.ptr, toNat(confirmation), round.session.ptr, round.state.rpd.ptr, round.state.ksd.ptr, round.dSign, round.dSignLen.convert(), round.transcript, round.transcriptLen.convert(), round.message, toNat(hostseckey32))
+                .requireSuccess("secp256k1_confederation_signer_confirm() failed")
+            confirmation
+        }
+    }
+
+    override fun confederationConfirmationCertificateWrite(session: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, confirmations64: Array<ByteArray>): ByteArray = memScoped {
+        require32(message32, "message")
+        val nSession = allocSignSession(session)
+        val sizes = confederationSignMessageSizes(session)
+        if (confirmations64.size != (sizes.certificate - 44) / 72) throw Secp256k1Exception("confirmations must match the selected signers")
+        val padded = paddedValues(confirmations64, 64, Secp256k1.CONFEDERATION_MAX_ROLES, "confirmation")
+        val out = ByteArray(sizes.certificate)
+        val outLen = alloc<size_tVar>()
+        outLen.value = out.size.convert()
+        secp256k1_confederation_confirmation_certificate_write(ctx, toNat(out), outLen.ptr, nSession.ptr, toNatAllowEmpty(dSign), dSign.size.convert(), toNatAllowEmpty(nonceTranscript), nonceTranscript.size.convert(), toNat(message32), padded.pointers)
+            .requireSuccess("secp256k1_confederation_confirmation_certificate_write() failed")
+        out.copyOf(outLen.value.toInt())
+    }
+
+    override fun confederationConfirmationVerify(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray): Boolean = memScoped {
+        val r = signingRound(session, rpd, ksd, dSign, nonceTranscript, message32, certificate)
+        secp256k1_confederation_confirmation_verify(ctx, r.session.ptr, r.state.rpd.ptr, r.state.ksd.ptr, r.dSign, r.dSignLen.convert(), r.transcript, r.transcriptLen.convert(), r.message, r.certificate, r.certificateLen.convert()) == 1
+    }
+
+    override fun confederationSignerPartial(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, share: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray): ByteArray = memScoped {
+        val r = signingRound(session, rpd, ksd, dSign, nonceTranscript, message32, certificate)
+        val nShare = allocValidShare(share, r.state)
+        try {
+            withSigner(signer) { nSigner ->
+                val partial = ByteArray(32)
+                secp256k1_confederation_signer_partial(ctx, toNat(partial), nSigner.ptr, r.session.ptr, r.state.rpd.ptr, r.state.ksd.ptr, nShare.ptr, r.dSign, r.dSignLen.convert(), r.transcript, r.transcriptLen.convert(), r.message, r.certificate, r.certificateLen.convert())
+                    .requireSuccess("secp256k1_confederation_signer_partial() failed")
+                partial
+            }
+        } finally {
+            memset(nShare.ptr, 0, Secp256k1.CONFEDERATION_SHARE_SIZE.convert())
+        }
+    }
+
+    override fun confederationMemberPartialVerify(partial32: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, selectedIndex: Int): Boolean = memScoped {
+        require32(partial32, "member partial")
+        require(selectedIndex in 0 until Secp256k1.CONFEDERATION_MAX_ROLES) { "invalid selected index" }
+        val r = signingRound(session, rpd, ksd, dSign, nonceTranscript, message32, certificate)
+        secp256k1_confederation_member_partial_verify(ctx, toNat(partial32), r.session.ptr, r.state.rpd.ptr, r.state.ksd.ptr, r.dSign, r.dSignLen.convert(), r.transcript, r.transcriptLen.convert(), r.message, r.certificate, r.certificateLen.convert(), selectedIndex.toUInt()) == 1
+    }
+
+    override fun confederationGroupPartialAggregate(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, outerIndex: Int, partials32: Array<ByteArray>): ByteArray = memScoped {
+        require(outerIndex in 0 until Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid outer index" }
+        val r = signingRound(session, rpd, ksd, dSign, nonceTranscript, message32, certificate)
+        val padded = paddedValues(partials32, 32, Secp256k1.CONFEDERATION_MAX_ROLES, "member partial")
+        val out = ByteArray(Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE)
+        secp256k1_confederation_group_partial_aggregate(ctx, toNat(out), r.session.ptr, r.state.rpd.ptr, r.state.ksd.ptr, r.dSign, r.dSignLen.convert(), r.transcript, r.transcriptLen.convert(), r.message, r.certificate, r.certificateLen.convert(), outerIndex.toUInt(), padded.pointers)
+            .requireSuccess("secp256k1_confederation_group_partial_aggregate() failed")
+        out
+    }
+
+    override fun confederationGroupPartialVerify(groupPartial36: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, outerIndex: Int): Boolean = memScoped {
+        require(groupPartial36.size == Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE) { "group partial must be ${Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE} bytes" }
+        require(outerIndex in 0 until Secp256k1.CONFEDERATION_MAX_GROUPS) { "invalid outer index" }
+        val r = signingRound(session, rpd, ksd, dSign, nonceTranscript, message32, certificate)
+        secp256k1_confederation_group_partial_verify(ctx, toNat(groupPartial36), r.session.ptr, r.state.rpd.ptr, r.state.ksd.ptr, r.dSign, r.dSignLen.convert(), r.transcript, r.transcriptLen.convert(), r.message, r.certificate, r.certificateLen.convert(), outerIndex.toUInt()) == 1
+    }
+
+    override fun confederationOuterAggregate(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, groupPartials36: Array<ByteArray>): ByteArray = memScoped {
+        val r = signingRound(session, rpd, ksd, dSign, nonceTranscript, message32, certificate)
+        // Read as one buffer of outer_count entries: padding keeps a short array inside the allocation.
+        val padded = paddedValues(groupPartials36, Secp256k1.CONFEDERATION_GROUP_PARTIAL_SIZE, Secp256k1.CONFEDERATION_MAX_GROUPS, "group partial")
+        val signature = ByteArray(64)
+        secp256k1_confederation_outer_aggregate(ctx, toNat(signature), r.session.ptr, r.state.rpd.ptr, r.state.ksd.ptr, r.dSign, r.dSignLen.convert(), r.transcript, r.transcriptLen.convert(), r.message, r.certificate, r.certificateLen.convert(), padded.flat)
+            .requireSuccess("secp256k1_confederation_outer_aggregate() failed")
+        signature
     }
 
     override fun confederationKsdPubkeyGet(ksd: ByteArray, rpd: ByteArray): ByteArray = memScoped {

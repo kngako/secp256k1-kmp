@@ -21,6 +21,16 @@ class ConfederationTest {
 
     private fun hostSecrets(): Array<ByteArray> = Array(9) { confederationHostSecret(it) }
 
+    // Fresh-looking per-signer nonce randomness; a test only needs it distinct per signer and per call.
+    private var secrandCounter = 0
+    private fun secrands(signers: Int): Array<ByteArray> = Array(signers) { signer ->
+        ByteArray(32).also {
+            it[0] = 0x4d
+            it[1] = (++secrandCounter).toByte()
+            it[31] = signer.toByte()
+        }
+    }
+
     private fun runDkg(sessionSeed: ByteArray): Pair<ByteArray, ConfederationDkgResult> {
         val rpd = Secp256k1.confederationRpdParse(confederationVectors().confederationHex("rpd"))
         val result = Secp256k1.confederationDkg(
@@ -64,6 +74,7 @@ class ConfederationTest {
             uintArrayOf(0u, 1u, 0u, 1u),
             ByteArray(4),
             message,
+            secrands(4),
         )
         assertTrue(Secp256k1.verifySchnorr(signature, message, Secp256k1.confederationKsdPubkeyGet(result.ksd, rpd)))
     }
@@ -90,6 +101,7 @@ class ConfederationTest {
             uintArrayOf(0u, 1u, 0u, 2u),
             vectors.confederationHex("signing_tweak_sequence"),
             vectors.confederationHex("message"),
+            secrands(4),
         )
         assertEquals(64, signature.size)
         val tweakedPubkey = vectors.confederationHex("tweaked_Q").copyOfRange(1, 33)
@@ -118,19 +130,19 @@ class ConfederationTest {
         assertFailsWith<Secp256k1Exception> {
             Secp256k1.confederationSign(
                 rpd, result.ksd, result.shares, hostSecrets(), ByteArray(32).also { it[0] = 0xb3.toByte() },
-                uintArrayOf(0u), intArrayOf(2), uintArrayOf(0u, 1u), ByteArray(4), message,
+                uintArrayOf(0u), intArrayOf(2), uintArrayOf(0u, 1u), ByteArray(4), message, secrands(2),
             )
         }
         assertFailsWith<Secp256k1Exception> {
             Secp256k1.confederationSign(
                 rpd, result.ksd, result.shares, hostSecrets(), ByteArray(32).also { it[0] = 0xb4.toByte() },
-                uintArrayOf(0u, 1u), intArrayOf(1, 1), uintArrayOf(0u, 0u), ByteArray(4), message,
+                uintArrayOf(0u, 1u), intArrayOf(1, 1), uintArrayOf(0u, 0u), ByteArray(4), message, secrands(2),
             )
         }
         assertFailsWith<Secp256k1Exception> {
             Secp256k1.confederationSign(
                 rpd, result.ksd, result.shares.dropLast(1).toTypedArray(), hostSecrets(), ByteArray(32).also { it[0] = 0xb5.toByte() },
-                uintArrayOf(0u, 1u), intArrayOf(2, 2), uintArrayOf(0u, 1u, 0u, 1u), ByteArray(4), message,
+                uintArrayOf(0u, 1u), intArrayOf(2, 2), uintArrayOf(0u, 1u, 0u, 1u), ByteArray(4), message, secrands(4),
             )
         }
         assertFailsWith<Secp256k1Exception> {

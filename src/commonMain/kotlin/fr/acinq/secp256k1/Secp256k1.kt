@@ -1264,9 +1264,10 @@ public interface Secp256k1 {
      * Run one complete Option A nested signing attempt and return a 64-byte BIP340 signature. [shares] and
      * [hostSeckeys32] contain one entry per flattened RPD role. [groupIds] and [innerCounts] select outer groups;
      * [adminIds] is their flattened, canonically ordered signer selection. Use a fresh signing session id for every
-     * attempt. Four zero bytes encode an empty tweak sequence.
+     * attempt. Four zero bytes encode an empty tweak sequence. [nonceSecrands32] holds one fresh 32-byte secret per
+     * selected signer, in selection order; it must never be derived from public data, and it is wiped.
      */
-    public fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray): ByteArray
+    public fun confederationSign(rpd: ByteArray, ksd: ByteArray, shares: Array<ByteArray>, hostSeckeys32: Array<ByteArray>, signingSessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray, message32: ByteArray, nonceSecrands32: Array<ByteArray>): ByteArray
 
     /** Return the confederation supergroup key as a 32-byte even-Y x-only public key. */
     public fun confederationKsdPubkeyGet(ksd: ByteArray, rpd: ByteArray): ByteArray
@@ -1327,6 +1328,66 @@ public interface Secp256k1 {
     /** Protocol section 7.5, a recipient: judge every dealer's response, concatenated in RPD role order. */
     public fun confederationDkgInvestigate(rpd: ByteArray, groupId: UInt, adminId: UInt, hostseckey32: ByteArray, broadcast: ByteArray, responses: ByteArray): ConfederationFault
 
+    /*
+     * Option A signing one signer per device (zkp protocol section 8). The session is public: every party builds it
+     * itself from the installed RPD and KSD, the selection and the tweak sequence, and a signer compares the
+     * coordinator's D_sign with its own before revealing a nonce. The signer state is a [CONFEDERATION_SIGNER_SIZE]
+     * array the caller allocates and these calls rewrite: issued by [confederationSignerNonceGen], confirmed once by
+     * [confederationSignerConfirm], wiped by [confederationSignerPartial] and by any failure. It holds a secret
+     * nonce: it must never be copied, persisted or restored, and a restart abandons the attempt.
+     *
+     *  1. every party:       [confederationSignSessionInit], then [confederationSignSessionCheck] on the coordinator's D_sign
+     *  2. every signer:      [confederationSignerNonceGen]               -> public nonce
+     *  3. outer coordinator: [confederationNonceTranscriptWrite]         -> transcript
+     *  4. every signer:      [confederationSignerConfirm]                -> confirmation
+     *  5. outer coordinator: [confederationConfirmationCertificateWrite] -> certificate
+     *  6. every signer:      [confederationSignerPartial]                -> member partial
+     *  7. group coordinator: [confederationGroupPartialAggregate]        -> group partial
+     *  8. outer coordinator: [confederationOuterAggregate]               -> BIP 340 signature
+     */
+
+    /** The session and D_sign for a selection: [groupIds] and [innerCounts] per outer group, [adminIds] flattened in canonical order. */
+    public fun confederationSignSessionInit(rpd: ByteArray, ksd: ByteArray, sessionId32: ByteArray, groupIds: UIntArray, innerCounts: IntArray, adminIds: UIntArray, tweakSequence: ByteArray): ConfederationSignSession
+
+    /** Whether [dSign], as the coordinator sent it, is exactly the D_sign [session] encodes. */
+    public fun confederationSignSessionCheck(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray): Boolean
+
+    /** The lengths of the session's D_sign, nonce transcript and confirmation certificate. */
+    public fun confederationSignMessageSizes(session: ByteArray): ConfederationSignMessageSizes
+
+    /** Write a fresh state into [signer] and return its 66-byte public nonce. [sessionSecrand32] must be fresh secret randomness; it is wiped. */
+    public fun confederationSignerNonceGen(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, share: ByteArray, dSign: ByteArray, sessionSecrand32: ByteArray): ByteArray
+
+    /** Wipe [signer]: on timeout, restart or a superseded attempt. */
+    public fun confederationSignerAbort(signer: ByteArray)
+
+    /** Outer coordinator: the transcript of every selected signer's public nonce, in selection order. */
+    public fun confederationNonceTranscriptWrite(session: ByteArray, pubnonces66: Array<ByteArray>): ByteArray
+
+    /** Check the transcript holds this signer's nonce and return its confirmation. [signer] is confirmed, or wiped on failure. */
+    public fun confederationSignerConfirm(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, hostseckey32: ByteArray): ByteArray
+
+    /** Outer coordinator: the certificate from every selected signer's confirmation, in selection order. It does not verify them. */
+    public fun confederationConfirmationCertificateWrite(session: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, confirmations64: Array<ByteArray>): ByteArray
+
+    /** Whether [certificate] is valid for the session and its messages. */
+    public fun confederationConfirmationVerify(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray): Boolean
+
+    /** The signer's 32-byte member partial. [signer] is wiped either way; a partial may be resent, never recomputed. */
+    public fun confederationSignerPartial(signer: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, share: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray): ByteArray
+
+    /** Group coordinator: whether a member partial verifies; [selectedIndex] is the signer's position in the flattened selection. */
+    public fun confederationMemberPartialVerify(partial32: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, selectedIndex: Int): Boolean
+
+    /** Group coordinator: one group's member partials, in selection order, summed into its 36-byte group partial. */
+    public fun confederationGroupPartialAggregate(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, outerIndex: Int, partials32: Array<ByteArray>): ByteArray
+
+    /** Outer coordinator: whether a group partial verifies; [outerIndex] is the group's position in the selection. */
+    public fun confederationGroupPartialVerify(groupPartial36: ByteArray, session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, outerIndex: Int): Boolean
+
+    /** Outer coordinator: the BIP 340 signature under the tweaked key from every group's partial, in selection order. */
+    public fun confederationOuterAggregate(session: ByteArray, rpd: ByteArray, ksd: ByteArray, dSign: ByteArray, nonceTranscript: ByteArray, message32: ByteArray, certificate: ByteArray, groupPartials36: Array<ByteArray>): ByteArray
+
     public companion object : Secp256k1 by getSecpk256k1() {
         @JvmStatic
         public fun get(): Secp256k1 = this
@@ -1347,6 +1408,9 @@ public interface Secp256k1 {
 
         public const val CONFEDERATION_EVIDENCE_AUTHORIZE: Int = 0
         public const val CONFEDERATION_EVIDENCE_ACKNOWLEDGE: Int = 1
+        public const val CONFEDERATION_SIGN_SESSION_SIZE: Int = 4096
+        public const val CONFEDERATION_SIGNER_SIZE: Int = 512
+        public const val CONFEDERATION_GROUP_PARTIAL_SIZE: Int = 36
         public const val CHILLDKG_PARTICIPANT_STATE1_SIZE: Int = 4306
         public const val CHILLDKG_PARTICIPANT_STATE2_SIZE: Int = 21073
         public const val CHILLDKG_PARTICIPANT_INVESTIGATION_DATA_SIZE: Int = 4205
@@ -1581,6 +1645,12 @@ public class ConfederationDkgAuthorization(public val ksd: ByteArray, public val
 public class ConfederationDkgShare(public val share: ByteArray, public val recovery: ByteArray) {
     override fun toString(): String = "ConfederationDkgShare(<secret>)"
 }
+
+/** A signing session: its public opaque bytes and the canonical D_sign they encode. Neither is secret. */
+public class ConfederationSignSession(public val session: ByteArray, public val dSign: ByteArray)
+
+/** The lengths of one signing session's messages. */
+public data class ConfederationSignMessageSizes(val dSign: Int, val nonceTranscript: Int, val certificate: Int)
 
 public class Secp256k1Exception : RuntimeException {
     public constructor() : super()

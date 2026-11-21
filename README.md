@@ -118,7 +118,7 @@ A typical initial sequence is:
 
 1. Parse and validate a canonical RPD, then call `confederationDkg` with a fresh session seed and one freshly generated host secret, dealer seed, and recovery nonce per flattened RPD role.
 2. Validate the genesis transition against the returned KSD. Persist accepted `(config_seq, RPD hash, KSD hash)` state, canonical transitions, shares, and recovery data atomically. Certificates do not provide consensus: check successors and quarantine conflicting certificates.
-3. Sign with a fresh signing session ID, full-role share and host-secret arrays, and canonically ordered group/admin selections. Four zero bytes encode no tweaks. Secret nonces are consumed by each attempt and must never be reused across attempts.
+3. Sign with a fresh signing session ID, full-role share and host-secret arrays, canonically ordered group/admin selections, and one fresh 32-byte secret per selected signer for its nonce, which is wiped. Four zero bytes encode no tweaks. Secret nonces are consumed by each attempt and must never be reused across attempts.
 4. Serialize recovery packages with `confederationRecoverySerialize`. Later, parse them with the corresponding host secret, open them against the current RPD/KSD, and validate the recovered share.
 
 #### The DKG one role at a time
@@ -135,9 +135,24 @@ A typical initial sequence is:
 
 A step that judges another party's message returns a `ConfederationStep.Faulted` carrying a `ConfederationFault`: a code and the flattened RPD index of the implicated role, or null. A fault is an answer, not an error. `Secp256k1Exception` is kept for this caller's own malformed input. `ROLE_OR_COORDINATOR` from step 3 means the role's share did not decrypt; `confederationDkgInvestigationResponse` and `confederationDkgInvestigate` decide whether the dealer or the coordinator is at fault. `ConfederationDistributedDkgTest` runs the whole ceremony against upstream's vectors.
 
+#### Signing one signer at a time
+
+`confederationSign` likewise holds every share in one process. The signing steps give each signer its own:
+
+1. Every party: `confederationSignSessionInit` builds the session and its D_sign from the installed RPD and KSD, the selection and the tweaks. A signer compares the coordinator's D_sign with its own (`confederationSignSessionCheck`) before revealing anything.
+2. Every signer: `confederationSignerNonceGen` writes a fresh state into a `CONFEDERATION_SIGNER_SIZE` array and returns a public nonce. The randomness is the caller's, fresh per call, and is wiped.
+3. Outer coordinator: `confederationNonceTranscriptWrite`.
+4. Every signer: `confederationSignerConfirm`, once.
+5. Outer coordinator: `confederationConfirmationCertificateWrite`; anyone can `confederationConfirmationVerify` it.
+6. Every signer: `confederationSignerPartial`.
+7. Each group coordinator: `confederationGroupPartialAggregate`, after `confederationMemberPartialVerify`.
+8. Outer coordinator: `confederationOuterAggregate`, a BIP 340 signature under the tweaked key.
+
+The signer state holds a secret nonce. The calls rewrite the caller's array: issued, then confirmed, then wiped by the partial or by any failure. It must never be copied, persisted or restored, since that can reuse a nonce and reveal the share; a restart abandons the attempt, and the next one takes a new session id. Wrap the array in a type that enforces single use. `ConfederationDistributedSigningTest` runs the steps against upstream's vectors and their misuse cases.
+
 The library is stateless. Transport, sender authentication, real-world entity attestation, authorization, durable attempt and abandonment records, timeout handling, consensus, and atomic state transitions remain application responsibilities. Unique host keys do not establish independent people or entities. RecoveryPackage encryption is a non-standard candidate; compromising a host key exposes that role's shares in every epoch where the key was registered.
 
-The bindings cleanse native scratch copies where practical, but cannot wipe caller-provided Kotlin arrays or returned secret objects. Upstream's enrollment, refresh, masking, and resharing round steps are internal at the pinned revision and are not exposed as public lifecycle orchestration here. `ConfederationTest`, `ConfederationVectorsTest` and `ConfederationDistributedDkgTest` demonstrate the supported call sequences.
+The bindings cleanse native scratch copies where practical, but cannot wipe caller-provided Kotlin arrays or returned secret objects. Upstream's enrollment, refresh, masking, and resharing round steps are internal at the pinned revision and are not exposed as public lifecycle orchestration here. `ConfederationTest`, `ConfederationVectorsTest`, `ConfederationDistributedDkgTest` and `ConfederationDistributedSigningTest` demonstrate the supported call sequences.
 
 ### FROST share refresh
 
