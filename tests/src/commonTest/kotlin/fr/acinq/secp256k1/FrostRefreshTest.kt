@@ -29,7 +29,7 @@ class FrostRefreshTest {
     private fun hostpubkeys(seckeys: List<ByteArray>): Array<ByteArray> = seckeys.map { Secp256k1.chilldkgHostpubkeyGen(it) }.toTypedArray()
 
     @Test
-    fun `the zkp vectors come out the same through the bindings`() {
+    fun zkpVectorsComeOutTheSameThroughTheBindings() {
         val params = Secp256k1.frostRefreshParamsSerialize(vThreshPk, hostpubkeys(vHostseckeys), vPubshares.toTypedArray(), 3, 1u, vIds, vRefreshId)
         assertEquals(vParamsHash, Hex.encode(Secp256k1.frostRefreshParamsHash(params)))
 
@@ -90,7 +90,7 @@ class FrostRefreshTest {
     }
 
     @Test
-    fun `a refresh keeps the key and moves every share`() {
+    fun refreshKeepsTheKeyAndMovesEveryShare() {
         val run = refresh(3, 2, uintArrayOf(0u, 1u, 2u))
         // The new table lies on a polynomial whose constant term is the unchanged key.
         assertTrue(Secp256k1.frostThresholdInfoValidate(run.threshPk, run.newTable, run.t))
@@ -101,7 +101,7 @@ class FrostRefreshTest {
     }
 
     @Test
-    fun `the certificate and recovery with a withheld participant`() {
+    fun certificateAndRecoveryWithAWithheldParticipant() {
         val run = refresh(4, 2, uintArrayOf(0u, 2u, 3u))
         val cmsg2 = assertNotNull(Secp256k1.frostRefreshCoordinatorFinalize(run.params, run.cmsg1, run.sigs.toTypedArray()).output)
         val recovery = assertNotNull(Secp256k1.frostRefreshParticipantFinalize(run.params, run.cmsg1, cmsg2).output)
@@ -127,7 +127,7 @@ class FrostRefreshTest {
     }
 
     @Test
-    fun `faults land on the right party`() {
+    fun faultsLandOnTheRightParty() {
         val run = refresh(3, 2, uintArrayOf(0u, 1u, 2u))
         val badSigs = run.sigs.mapIndexed { i, s -> if (i == 2) s.copyOf().also { it[5] = (it[5].toInt() xor 1).toByte() } else s }
         val finalized = Secp256k1.frostRefreshCoordinatorFinalize(run.params, run.cmsg1, badSigs.toTypedArray())
@@ -147,7 +147,7 @@ class FrostRefreshTest {
     }
 
     @Test
-    fun `malformed input is refused before it reaches native code`() {
+    fun malformedInputIsRefusedBeforeItReachesNativeCode() {
         val run = refresh(3, 2, uintArrayOf(0u, 1u, 2u))
         assertFailsWith<IllegalArgumentException> {
             Secp256k1.frostRefreshParticipantStep2(run.hostseckeys[0], run.secshares[0], run.params, 0u, run.cmsg1.copyOf(run.cmsg1.size - 1), seckey(7, 0))
