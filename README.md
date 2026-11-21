@@ -125,6 +125,19 @@ The library is stateless. Transport, sender authentication, real-world entity at
 
 The bindings cleanse native scratch copies where practical, but cannot wipe caller-provided Kotlin arrays or returned secret objects. Upstream's enrollment, refresh, masking, and resharing round steps are internal at the pinned revision and are not exposed as public lifecycle orchestration here. `ConfederationTest` and `ConfederationVectorsTest` demonstrate the supported call sequences.
 
+### FROST share refresh
+
+`frostRefresh*` gives every recipient of a ChillDKG group a new share of the same threshold key, on a new polynomial, so that shares from before the refresh no longer combine with shares after it. Enrollment cannot do this: it evaluates the existing polynomial. The session parameters cross the binding as their serialization, from `frostRefreshParamsSerialize`, and every other function takes them:
+
+1. Every recipient (at least t, each a dealer) calls `frostRefreshParticipantStep1` with fresh randomness and sends the result to the coordinator.
+2. The coordinator calls `frostRefreshCoordinatorStep1` and broadcasts cmsg1.
+3. Every recipient calls `frostRefreshParticipantStep2`, stores the new share and public-share table durably, and only then sends its CertEq signature.
+4. `frostRefreshCoordinatorFinalize` makes the certificate; `frostRefreshParticipantFinalize` verifies it and yields recovery data. Only then does the group move to the new generation.
+
+A participant left out of the recipients is withheld: its public share moves, but it is dealt nothing, and a reduced-enrollment repair at its identifier is how it is brought back. Recovery data rebuilds a recipient's new share from its host secret key and previous share (`frostRefreshParticipantRecover`), and anyone's view of the new table (`frostRefreshPublicRecover`).
+
+**Warning:** the underlying refresh module is experimental, has no BIP and no independent review, and must not be used in production. A refresh is only as good as the deletion of the old shares, and does not survive a leaked host secret key. `FrostRefreshTest` demonstrates the call sequence.
+
 ## Building
 
 **secp256k1-kmp** is a [Kotlin Multiplatform](https://kotlinlang.org/docs/multiplatform.html) wrapper for Bitcoin Core's [secp256k1 library](https://github.com/bitcoin-core/secp256k1).

@@ -970,6 +970,61 @@ public interface Secp256k1 {
     public fun chilldkgParticipantInvestigate(investigationData: ByteArray, cinv: ByteArray): ChilldkgFault
 
     /**
+     * Validate and serialize the parameters of one FROST share refresh session (secp256k1-zkp frost_refresh).
+     *
+     * A refresh gives every recipient a new share of the SAME threshold key, on a new polynomial, so shares from
+     * before it stop combining with shares after it. Every party to a session must pass identical arguments: all
+     * of them are bound into the parameters hash. The returned serialization is what every other frostRefresh
+     * function takes as `params`.
+     *
+     * WARNING: the underlying module is experimental, has no BIP and no independent review, and must not be used
+     * in production. A refresh is only as good as the deletion of the old shares: t shares of any one generation
+     * still reconstruct the key.
+     *
+     * @param threshPk 33-byte threshold public key.
+     * @param hostpubkeys33 the n ChillDKG host public keys, in participant order.
+     * @param pubshares33 the n public shares of the generation being refreshed, in participant order. Must come
+     * from authenticated group state.
+     * @param threshold t, at least 2.
+     * @param generation the generation being refreshed (0 for ChillDKG's output).
+     * @param recipientIds the recipients' identifiers, strictly ascending, at least t of them.
+     * @param refreshId32 32 bytes naming exactly one session.
+     */
+    public fun frostRefreshParamsSerialize(threshPk: ByteArray, hostpubkeys33: Array<ByteArray>, pubshares33: Array<ByteArray>, threshold: Int, generation: UInt, recipientIds: UIntArray, refreshId32: ByteArray): ByteArray
+
+    /** The 32-byte parameters hash of a refresh session. */
+    public fun frostRefreshParamsHash(params: ByteArray): ByteArray
+
+    /**
+     * Round 1: a recipient deals its zero-constant polynomial. [random32] must be fresh for every call.
+     * @return pmsg1, to send to the coordinator. Contains no secret in the clear.
+     */
+    public fun frostRefreshParticipantStep1(hostseckey32: ByteArray, params: ByteArray, participantId: UInt, random32: ByteArray): ByteArray
+
+    /** The coordinator sums the recipients' round-1 messages, given in recipient order. */
+    public fun frostRefreshCoordinatorStep1(pmsgs1: Array<ByteArray>, params: ByteArray): FrostRefreshCoordinatorStep1Result
+
+    /**
+     * Round 2: a recipient decrypts and checks what it was dealt, and computes its new share, the new public-share
+     * table (every participant's, the withheld included) and its CertEq signature. The caller must store the new
+     * share and table durably before sending the signature, and must not sign with the new share before the
+     * certificate verifies ([frostRefreshParticipantFinalize]).
+     */
+    public fun frostRefreshParticipantStep2(hostseckey32: ByteArray, secshare32: ByteArray, params: ByteArray, participantId: UInt, cmsg1: ByteArray, auxRand32: ByteArray): FrostRefreshParticipantStep2Result
+
+    /** The coordinator verifies the recipients' signatures, given in recipient order, into the certificate (cmsg2). */
+    public fun frostRefreshCoordinatorFinalize(params: ByteArray, cmsg1: ByteArray, pmsgs2: Array<ByteArray>): FrostRefreshFinalizeResult
+
+    /** Anyone verifies the certificate; on success the output is the recovery data, which holds no secret in the clear. */
+    public fun frostRefreshParticipantFinalize(params: ByteArray, cmsg1: ByteArray, cmsg2: ByteArray): FrostRefreshFinalizeResult
+
+    /** A recipient rebuilds its new share from the recovery data, its host secret key and its previous share. */
+    public fun frostRefreshParticipantRecover(hostseckey32: ByteArray, secshare32: ByteArray, recovery: ByteArray): FrostRefreshRecoverResult
+
+    /** Anyone rebuilds the session parameters and the new public-share table from certified recovery data. */
+    public fun frostRefreshPublicRecover(recovery: ByteArray): FrostRefreshPublicRecoverResult
+
+    /**
      * Deal the shares of an Iceberg group from a single seed (trusted dealer).
      *
      * Iceberg is a threshold scheme that lets a group of parties stand in for a single MuSig2 participant. The
@@ -1327,6 +1382,61 @@ public data class ChilldkgFault(val code: Int, val participantIndex: UInt?) {
         public const val INVALID_INPUT: Int = 5
     }
 }
+
+/**
+ * The shape of a FROST refresh session -- n, t and the recipients -- read from serialized parameters, which begin
+ * u32be(n) || u32be(t) || u32be(generation) || thresh_pk33 || hostpubkeys33 (n) || pubshares33 (n) || u32be(r) ||
+ * recipient ids (r) || refresh_id32. Recovery data begins with the same serialization. Only sizes outputs; the
+ * native code validates.
+ */
+public data class FrostRefreshShape(val nParticipants: Int, val threshold: Int, val generation: UInt, val recipientIds: List<UInt>) {
+    public val nRecipients: Int get() = recipientIds.size
+    public val participantMsg1Len: Int get() = 33 * (threshold - 1) + 33 + 32 * nRecipients
+    public val coordinatorMsg1Len: Int get() = 33 * (threshold - 1) + 65 * nRecipients
+    public val serializedLen: Int get() = 12 + 33 + 66 * nParticipants + 4 + 4 * nRecipients + 32
+    public val recoveryLen: Int get() = serializedLen + coordinatorMsg1Len + 64 * nRecipients
+
+    public companion object {
+        private fun be32(b: ByteArray, at: Int): Int =
+            ((b[at].toInt() and 0xff) shl 24) or ((b[at + 1].toInt() and 0xff) shl 16) or ((b[at + 2].toInt() and 0xff) shl 8) or (b[at + 3].toInt() and 0xff)
+
+        /** The shape at the front of [bytes] (parameters or recovery data), or null if it cannot have one. */
+        public fun of(bytes: ByteArray): FrostRefreshShape? {
+            if (bytes.size < 12) return null
+            val n = be32(bytes, 0)
+            val t = be32(bytes, 4)
+            if (n < 2 || n > Secp256k1.CHILLDKG_MAX_PARTICIPANTS || t < 2 || t > n) return null
+            val rAt = 12 + 33 + 66 * n
+            if (bytes.size < rAt + 4) return null
+            val r = be32(bytes, rAt)
+            if (r < t || r > n || bytes.size < rAt + 4 + 4 * r + 32) return null
+            return FrostRefreshShape(n, t, be32(bytes, 8).toUInt(), List(r) { be32(bytes, rAt + 4 + 4 * it).toUInt() })
+        }
+    }
+}
+
+/** Result of [Secp256k1.frostRefreshCoordinatorStep1]. [cmsg1] is null on fault. */
+public data class FrostRefreshCoordinatorStep1Result(val fault: ChilldkgFault, val cmsg1: ByteArray?)
+
+/**
+ * Result of [Secp256k1.frostRefreshParticipantStep2]. On fault the outputs are null. A
+ * [ChilldkgFault.UNKNOWN_FAULTY_PARTICIPANT_OR_COORDINATOR] means what was dealt does not match the commitments;
+ * the module has no investigation procedure, so the session must be abandoned.
+ */
+public data class FrostRefreshParticipantStep2Result(val fault: ChilldkgFault, val newSecshare: ByteArray?, val newPubshares: Array<ByteArray>?, val sig64: ByteArray?) {
+    override fun toString(): String = "FrostRefreshParticipantStep2Result(fault=$fault, newSecshare=${if (newSecshare == null) "null" else "<secret>"})"
+}
+
+/** Result of [Secp256k1.frostRefreshCoordinatorFinalize] (the certificate) and [Secp256k1.frostRefreshParticipantFinalize] (the recovery data). */
+public data class FrostRefreshFinalizeResult(val fault: ChilldkgFault, val output: ByteArray?)
+
+/** Result of [Secp256k1.frostRefreshParticipantRecover]. */
+public data class FrostRefreshRecoverResult(val fault: ChilldkgFault, val newSecshare: ByteArray?, val newPubshares: Array<ByteArray>?, val participantId: UInt?) {
+    override fun toString(): String = "FrostRefreshRecoverResult(fault=$fault, participantId=$participantId, newSecshare=${if (newSecshare == null) "null" else "<secret>"})"
+}
+
+/** Result of [Secp256k1.frostRefreshPublicRecover]. */
+public data class FrostRefreshPublicRecoverResult(val fault: ChilldkgFault, val params: ByteArray?, val newPubshares: Array<ByteArray>?)
 
 /** Result of [Secp256k1.chilldkgCoordinatorStep1]. On fault, [state] and [cmsg1] are zeroed. */
 public data class ChilldkgCoordinatorStep1Result(val fault: ChilldkgFault, val state: ByteArray, val cmsg1: ByteArray)
